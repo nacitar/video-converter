@@ -450,7 +450,9 @@ def get_encoder_cli(
     *,
     crf: int = 22,
     preset: str = "slow",
+    copy_video: bool = False,
     no_video: bool = False,
+    copy_audio: bool = False,
     no_audio: bool = False,
     no_subtitles: bool = False,
     no_chapters: bool = False,
@@ -506,44 +508,52 @@ def get_encoder_cli(
         first_video_track = True
         for track in video_output_tracks:
             track_id = map_track(track)
+
             track_arguments = {
-                "-codec": "libx265",  # HEVC
-                "-crf": str(crf),
-                "-preset": preset,
-                "-disposition": "default" if first_video_track else "0",
+                "-disposition": "default" if first_video_track else "0"
             }
             first_video_track = False
-            if track.is_hdr():
-                x265_params = [
-                    "repeat-headers=1",
-                    (
-                        "master-display="
-                        + "G(13250,34500)B(7500,3000)R(34000,16000)"
-                        + "WP(15635,16450)L(10000000,1)"
-                    ),
-                ]
-
-                if cll := track.content_light_levels():
-                    x265_params.append(f"max-cll={cll}")
-
-                track_arguments.update(
-                    {
-                        "-pix_fmt": "yuv420p10le",
-                        "-color_primaries": "bt2020",
-                        "-colorspace": "bt2020nc",
-                        "-color_trc": "smpte2084",
-                        "-x265-params": ":".join(x265_params),
-                    }
-                )
+            if copy_video:
+                track_arguments["-codec"] = "copy"
             else:
                 track_arguments.update(
                     {
-                        "-pix_fmt": "yuv420p",
-                        "-color_primaries": "bt709",
-                        "-colorspace": "bt709",
-                        "-color_trc": "bt709",
+                        "-codec": "libx265",  # HEVC
+                        "-crf": str(crf),
+                        "-preset": preset,
                     }
                 )
+                if track.is_hdr():
+                    x265_params = [
+                        "repeat-headers=1",
+                        (
+                            "master-display="
+                            + "G(13250,34500)B(7500,3000)R(34000,16000)"
+                            + "WP(15635,16450)L(10000000,1)"
+                        ),
+                    ]
+
+                    if cll := track.content_light_levels():
+                        x265_params.append(f"max-cll={cll}")
+
+                    track_arguments.update(
+                        {
+                            "-pix_fmt": "yuv420p10le",
+                            "-color_primaries": "bt2020",
+                            "-colorspace": "bt2020nc",
+                            "-color_trc": "smpte2084",
+                            "-x265-params": ":".join(x265_params),
+                        }
+                    )
+                else:
+                    track_arguments.update(
+                        {
+                            "-pix_fmt": "yuv420p",
+                            "-color_primaries": "bt709",
+                            "-colorspace": "bt709",
+                            "-color_trc": "bt709",
+                        }
+                    )
             arguments.extend(
                 dict_to_args(track_arguments, key_suffix=f":{track_id}")
             )
@@ -569,12 +579,12 @@ def get_encoder_cli(
             audio_fallback = None  # not needed; we have 5.1
 
         audio_output_tracks = [
-            (EncoderSettings(channels=6), audio_6ch),
+            (EncoderSettings(copy_only=copy_audio, channels=6), audio_6ch),
             (EncoderSettings(copy_only=True), audio_best_atmos),
-            (EncoderSettings(), audio_fallback),
+            (EncoderSettings(copy_only=copy_audio), audio_fallback),
         ]
         audio_output_tracks.extend(
-            (EncoderSettings(), track)
+            (EncoderSettings(copy_only=copy_audio), track)
             for track in extra_audio_tracks
             if track not in [entry[1] for entry in audio_output_tracks]
         )
@@ -584,8 +594,10 @@ def get_encoder_cli(
             if track is None:
                 continue
             track_id = map_track(track)
-
-            track_arguments = {}
+            track_arguments = {
+                "-disposition": "default" if first_audio_track else "0"
+            }
+            first_audio_track = False
             if settings.copy_only:
                 track_arguments["-codec"] = "copy"
             else:
@@ -599,11 +611,6 @@ def get_encoder_cli(
                 else:
                     channels = track.channels
                 track_arguments["-b"] = f"{channels * 112}k"
-            if first_audio_track:
-                first_audio_track = False
-                track_arguments["-disposition"] = "default"
-            else:
-                track_arguments["-disposition"] = "0"
             arguments.extend(
                 dict_to_args(track_arguments, key_suffix=f":{track_id}")
             )
@@ -676,7 +683,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--preset", default="slow", help="The preset to use with HEVC."
     )
     convert.add_argument(
+        "--copy-video",
+        action="store_true",
+        help="Don't re-encode video tracks.",
+    )
+    convert.add_argument(
         "--no-video", action="store_true", help="Don't include video tracks."
+    )
+    convert.add_argument(
+        "--copy-audio",
+        action="store_true",
+        help="Don't re-encode audio tracks.",
     )
     convert.add_argument(
         "--no-audio", action="store_true", help="Don't include audio tracks."
@@ -726,7 +743,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     extra_av_indexes=args.extra_av,
                     crf=args.crf,
                     preset=args.preset,
+                    copy_video=args.copy_video,
                     no_video=args.no_video,
+                    copy_audio=args.copy_audio,
                     no_audio=args.no_audio,
                     no_subtitles=args.no_subtitles,
                     no_chapters=args.no_chapters,
