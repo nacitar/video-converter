@@ -3,15 +3,21 @@ import importlib.metadata
 import json
 import logging
 import subprocess
-from dataclasses import KW_ONLY, dataclass, field
+from dataclasses import KW_ONLY, asdict, dataclass, field
 from functools import cache, cached_property
 from logging import Handler
 from logging.handlers import RotatingFileHandler
+from os import linesep
 from pathlib import Path
 from shlex import quote
 from shutil import which
 from types import MappingProxyType
-from typing import Any, Mapping, Sequence, cast
+from typing import TYPE_CHECKING, cast, Any
+
+if TYPE_CHECKING:
+    from typing import Mapping, Sequence
+
+    from _typeshed import DataclassInstance
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +103,13 @@ def dict_to_args(
         for key, value in data.items()
         for item in (f"{key}{key_suffix}", value)
     ]
+
+
+def pretty_dataclass_str(obj: DataclassInstance) -> str:
+    return linesep.join(
+        [type(obj).__name__]
+        + [f"- {key}: {value}" for key, value in asdict(obj).items()]
+    )
 
 
 @dataclass(frozen=True)
@@ -273,6 +286,9 @@ class TrackMetadata:
             return 40
 
         return 10
+
+    def __str__(self) -> str:
+        return pretty_dataclass_str(self)
 
 
 @dataclass
@@ -467,7 +483,7 @@ def get_encoder_cli(
                         "-colorspace": "bt2020nc",
                         "-color_trc": "smpte2084",
                         "-x265-params": (
-                            "master-display="
+                            "repeat-headers=1:master-display="
                             + "G(13250,34500)B(7500,3000)R(34000,16000)"
                             + "WP(15635,16450)L(10000000,1)"
                         ),
@@ -604,28 +620,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Maximizes console log verbosity to DEBUG.  Overrides -v and -q.",
     )
     parser.add_argument("input", type=Path, help="Input media file.")
-    parser.add_argument(
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("probe", help="Probe media.")  # NO VAR
+
+    convert = sub.add_parser("convert", help="Convert media.")
+
+    convert.add_argument(
         "--crf", type=int, default=22, help="The CRF to use with HEVC."
     )
-    parser.add_argument(
+    convert.add_argument(
         "--preset", default="slow", help="The preset to use with HEVC."
     )
-    parser.add_argument(
+    convert.add_argument(
         "--no-video", action="store_true", help="Don't include video tracks."
     )
-    parser.add_argument(
+    convert.add_argument(
         "--no-audio", action="store_true", help="Don't include audio tracks."
     )
-    parser.add_argument(
+    convert.add_argument(
         "--no-subtitles", action="store_true", help="Don't include subtitles."
     )
-    parser.add_argument(
+    convert.add_argument(
         "--no-chapters", action="store_true", help="Don't include chapters."
     )
-    parser.add_argument(
+    convert.add_argument(
         "-o", "--output", type=Path, help="Output media file.", required=True
     )
-    parser.add_argument(
+    convert.add_argument(
         "-e",
         "--extra-av",
         type=int,
@@ -647,19 +668,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         ),
     )
-    print(
-        cli_string(
-            get_encoder_cli(
-                args.input,
-                args.output,
-                extra_av_indexes=args.extra_av,
-                crf=args.crf,
-                preset=args.preset,
-                no_video=args.no_video,
-                no_audio=args.no_audio,
-                no_subtitles=args.no_subtitles,
-                no_chapters=args.no_chapters,
+    if args.command == "probe":
+        info = MediaInfo.from_path(args.input)
+        for track in info.tracks:
+            print(track)
+            print()
+    elif args.command == "convert":
+        print(
+            cli_string(
+                get_encoder_cli(
+                    args.input,
+                    args.output,
+                    extra_av_indexes=args.extra_av,
+                    crf=args.crf,
+                    preset=args.preset,
+                    no_video=args.no_video,
+                    no_audio=args.no_audio,
+                    no_subtitles=args.no_subtitles,
+                    no_chapters=args.no_chapters,
+                )
             )
         )
-    )
     return 0
