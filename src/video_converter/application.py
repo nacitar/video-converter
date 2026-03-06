@@ -464,7 +464,12 @@ def get_encoder_cli(
     input_file_index = 0  # TODO: assumes only one input file!
     tracker = IdentifierTracker()
     arguments = dict_to_args(
-        {"-i": str(input), "-map_metadata": "-1", "-map_metadata:s": "-1"}
+        {
+            "-i": str(input),
+            "-map_metadata:g": "-1",
+            "-map_metadata:s": "-1",
+            "-map_metadata:p": "-1",
+        }
     )
 
     track_arguments: dict[str, str]
@@ -483,16 +488,15 @@ def get_encoder_cli(
 
     def map_track(track: TrackMetadata) -> str:  # closure
         track_id = tracker.next(track.codec_type)
-        arguments.extend(
-            [
-                "-map",
-                f"{input_file_index}:{track.identifier}",
-                f"-metadata:s:{track_id}",
-                f"title={track.title}",
-                f"-metadata:s:{track_id}",
-                f"language={track.language}",
-            ]
-        )
+        arguments.extend(["-map", f"{input_file_index}:{track.identifier}"])
+        if track.title:
+            arguments.extend(
+                [f"-metadata:s:{track_id}", f"title={track.title}"]
+            )
+        if track.language:
+            arguments.extend(
+                [f"-metadata:s:{track_id}", f"language={track.language}"]
+            )
         return track_id
 
     if not no_video:
