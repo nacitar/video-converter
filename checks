@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+from pathlib import Path
+from subprocess import CalledProcessError, run
+
+
+def main() -> int:
+    this_script = Path(__file__).resolve()
+    project_root_dir = this_script.parent
+    scripts = [this_script.name]
+    commands = [
+        (["black", "."] + scripts, "formatting code"),
+        (["isort", "."] + scripts, "sorting imports"),
+        (["mypy", "--scripts-are-modules"] + scripts, "typechecking scripts"),
+        (["mypy", "."], "typechecking package"),
+        (["flake8", "."] + scripts, "linting"),
+        (["pytest"], "executing tests"),
+    ]
+    for command, description in commands:
+        print(f"Running {command[0]}... ({description})")
+        try:
+            run(command, check=True, cwd=project_root_dir)
+        except CalledProcessError as e:
+            return e.returncode
+        print()
+    print("All checks completed successfully!")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main())

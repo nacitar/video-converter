@@ -1,0 +1,42 @@
+[project]
+name = "video-converter"
+version = "0.1.0"
+description = "A video converter for space-saving and Plex."
+authors = [
+    {name = "Jacob McIntosh",email = "nacitar.sevaht@gmail.com"}
+]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+]
+
+[tool.poetry]
+packages = [{include = "video_converter", from = "src"}]
+
+[tool.poetry.group.dev.dependencies]
+black = "^25.12.0"
+flake8 = "^7.3.0"
+isort = "^6.1.0"
+mypy = "^1.19.1"
+pytest = "^8.4.2"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 79
+skip-magic-trailing-comma = true
+
+[tool.isort]
+line_length = 79
+profile = "black"
+
+[tool.mypy]
+strict = true
+
+[tool.poetry.scripts]
+video-converter = "video_converter.__main__:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
