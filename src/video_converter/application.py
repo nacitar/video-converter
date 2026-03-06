@@ -5,6 +5,7 @@ import logging
 import subprocess
 from dataclasses import KW_ONLY, asdict, dataclass, field
 from functools import cache, cached_property
+from itertools import chain
 from logging import Handler
 from logging.handlers import RotatingFileHandler
 from os import linesep
@@ -105,10 +106,15 @@ def dict_to_args(
     ]
 
 
-def pretty_dataclass_str(obj: DataclassInstance) -> str:
+def pretty_dataclass_str(
+    obj: DataclassInstance, extra: dict[str, Any] | None = None
+) -> str:
     return linesep.join(
         [type(obj).__name__]
-        + [f"- {key}: {value}" for key, value in asdict(obj).items()]
+        + [
+            f"- {key}: {value}"
+            for key, value in chain(asdict(obj).items(), (extra or {}).items())
+        ]
     )
 
 
@@ -213,6 +219,14 @@ class TrackMetadata:
         # NOTE: can be UHD 3840x2160 or DCI 4096x2160
         return self.is_video() and self.height == 2160
 
+    def is_cropped_2160p(self) -> bool:
+        # NOTE: can be UHD 3840x2160 or DCI 4096x2160
+        return (
+            self.is_video()
+            and self.width in (3840, 4096)
+            and self.height < 2160
+        )
+
     def is_atmos(self) -> bool:
         profile = self.profile.casefold()
         return (
@@ -256,7 +270,14 @@ class TrackMetadata:
         return 10
 
     def __str__(self) -> str:
-        return pretty_dataclass_str(self)
+        return pretty_dataclass_str(
+            self,
+            extra={
+                "is_hdr": self.is_hdr(),
+                "is_2160p": self.is_2160p(),
+                "is_cropped_2160p": self.is_cropped_2160p(),
+            },
+        )
 
 
 @dataclass
@@ -564,6 +585,13 @@ def get_encoder_cli(
 
     if not no_audio:
         audio_best_atmos = info.best_audio([AudioFilter(atmos=True)])
+        audio_best_non_atmos = info.best_audio([AudioFilter(atmos=False)])
+        if (
+            audio_best_non_atmos is not None
+            and audio_best_non_atmos.channels <= 6
+        ):
+            audio_best_non_atmos = None  # not better than 6ch, already covered
+
         audio_6ch = info.best_audio(
             [
                 AudioFilter(atmos=False, channel_min=6, channel_max=6),
@@ -584,6 +612,7 @@ def get_encoder_cli(
 
         audio_output_tracks = [
             (EncoderSettings(copy_only=copy_audio, channels=6), audio_6ch),
+            (EncoderSettings(copy_only=copy_audio), audio_best_non_atmos),
             (EncoderSettings(copy_only=True), audio_best_atmos),
             (EncoderSettings(copy_only=copy_audio), audio_fallback),
         ]
@@ -605,16 +634,29 @@ def get_encoder_cli(
             if settings.copy_only:
                 track_arguments["-codec"] = "copy"
             else:
-                track_arguments["-codec"] = "eac3"
                 if (
                     settings.channels is not None
                     and settings.channels != track.channels
                 ):
                     channels = settings.channels
-                    track_arguments["-ac"] = str(channels)
                 else:
                     channels = track.channels
-                track_arguments["-b"] = f"{channels * 112}k"
+                if channels > 6:
+                    track_arguments.update(
+                        {
+                            "-codec": "libopus",
+                            "-ac": str(channels),
+                            "-b": f"{channels * 80}k",
+                        }
+                    )
+                else:
+                    track_arguments.update(
+                        {
+                            "-codec": "eac3",
+                            "-ac": str(channels),
+                            "-b": f"{channels * 112}k",
+                        }
+                    )
             arguments.extend(
                 dict_to_args(track_arguments, key_suffix=f":{track_id}")
             )
