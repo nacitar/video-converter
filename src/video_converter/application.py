@@ -616,8 +616,21 @@ def get_encoder_cli(
             )
     if not no_subtitles:
         arguments.extend(dict_to_args({"-codec:s": "copy"}))
+        first_english_subtitle_track = True
         for track in info.subtitle_tracks:
             track_id = map_track(track)
+            track_arguments = {}
+            if (
+                first_english_subtitle_track
+                and track.language.casefold() == "eng"
+            ):
+                track_arguments["-disposition"] = "default"
+                first_english_subtitle_track = False
+            else:
+                track_arguments["-disposition"] = "0"
+            arguments.extend(
+                dict_to_args(track_arguments, key_suffix=f":{track_id}")
+            )
 
     if not no_chapters:
         arguments.extend(
