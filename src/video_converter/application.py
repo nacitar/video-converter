@@ -12,7 +12,7 @@ from pathlib import Path
 from shlex import quote
 from shutil import which
 from types import MappingProxyType
-from typing import TYPE_CHECKING, cast, Any
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 if TYPE_CHECKING:
     from typing import Mapping, Sequence
@@ -121,6 +121,7 @@ class SideData:
 
 @dataclass(frozen=True)
 class TrackMetadata:
+    identifier: str
     index: int
     codec_type: str
     codec_name: str
@@ -133,39 +134,6 @@ class TrackMetadata:
     width: int
     height: int
     side_data_list: tuple[SideData, ...]
-
-    @classmethod
-    def from_json(cls, data: Any) -> TrackMetadata:
-        if not isinstance(data, dict):
-            raise TypeError(f"data is not a dict: {data}")
-        tags = cast(dict[str, Any], data.get("tags") or {})
-        return TrackMetadata(
-            index=int(data["index"]),
-            codec_type=str(data["codec_type"]),
-            codec_name=str(data["codec_name"]),
-            profile=str(data.get("profile") or ""),
-            title=str(tags.get("title") or ""),
-            language=(
-                ""
-                if (language := str(tags.get("language", ""))) == "und"
-                else language
-            ),
-            channels=int(data.get("channels") or 0),
-            color_transfer=str(data.get("color_transfer") or ""),
-            color_primaries=str(data.get("color_primaries") or ""),
-            width=int(data.get("width") or 0),
-            height=int(data.get("height") or 0),
-            side_data_list=tuple(
-                [
-                    SideData(
-                        type=str(entry["side_data_type"]),
-                        max_content=int(entry.get("max_content") or 0),
-                        max_average=int(entry.get("max_average") or 0),
-                    )
-                    for entry in (data.get("side_data_list") or [])
-                ]
-            ),
-        )
 
     def is_video(self) -> bool:
         return (
@@ -298,6 +266,26 @@ class AudioFilter:
     channel_max: int | None = None
 
 
+@dataclass
+class IdentifierTracker:
+    last_index_map: dict[str, int] = field(default_factory=dict)
+    PREFIX_MAP: ClassVar[Mapping[str, str]] = MappingProxyType(
+        {
+            "video": "v",
+            "audio": "a",
+            "subtitle": "s",
+            "data": "d",
+            "attachment": "t",
+        }
+    )
+
+    def next(self, codec_type: str) -> str:
+        prefix = type(self).PREFIX_MAP[codec_type]
+        index = self.last_index_map.get(prefix, 0)
+        self.last_index_map[prefix] = index + 1
+        return f"{prefix}:{index}"
+
+
 @dataclass(frozen=True)
 class MediaInfo:
     tracks: tuple[TrackMetadata, ...]
@@ -325,13 +313,49 @@ class MediaInfo:
         ]
         log_cli(arguments)
         data = json.loads(subprocess.check_output(arguments))
-        tracks: tuple[TrackMetadata, ...] = tuple(
-            TrackMetadata.from_json(track)
-            for track in sorted(
-                data["streams"], key=lambda stream: int(stream["index"])
+
+        tracker = IdentifierTracker()
+
+        tracks: list[TrackMetadata] = []
+
+        for track in sorted(
+            data["streams"], key=lambda stream: int(stream["index"])
+        ):
+            if not isinstance(track, dict):
+                raise TypeError(f"track is not a dict: {track}")
+            tags = cast(dict[str, Any], track.get("tags") or {})
+            codec_type = str(track["codec_type"])
+            tracks.append(
+                TrackMetadata(
+                    identifier=tracker.next(codec_type),
+                    index=int(track["index"]),
+                    codec_type=codec_type,
+                    codec_name=str(track["codec_name"]),
+                    profile=str(track.get("profile") or ""),
+                    title=str(tags.get("title") or ""),
+                    language=(
+                        ""
+                        if (language := str(tags.get("language", ""))) == "und"
+                        else language
+                    ),
+                    channels=int(track.get("channels") or 0),
+                    color_transfer=str(track.get("color_transfer") or ""),
+                    color_primaries=str(track.get("color_primaries") or ""),
+                    width=int(track.get("width") or 0),
+                    height=int(track.get("height") or 0),
+                    side_data_list=tuple(
+                        [
+                            SideData(
+                                type=str(entry["side_data_type"]),
+                                max_content=int(entry.get("max_content") or 0),
+                                max_average=int(entry.get("max_average") or 0),
+                            )
+                            for entry in (track.get("side_data_list") or [])
+                        ]
+                    ),
+                )
             )
-        )
-        return MediaInfo(tracks=tracks)
+        return MediaInfo(tracks=tuple(tracks))
 
     def track_from_index(self, index: int) -> TrackMetadata:
         return self.track_indexes[index]
@@ -436,8 +460,10 @@ def get_encoder_cli(
 
     info = MediaInfo.from_path(input)
     input_file_index = 0  # TODO: assumes only one input file!
-    video_index = audio_index = 0  # applies to all inputs, if more added later
-    arguments = dict_to_args({"-i": str(input)})
+    tracker = IdentifierTracker()
+    arguments = dict_to_args(
+        {"-i": str(input), "-map_metadata": "-1", "-map_metadata:s": "-1"}
+    )
 
     track_arguments: dict[str, str]
     track: TrackMetadata | None
@@ -453,6 +479,20 @@ def get_encoder_cli(
         else:
             raise ValueError(f"Extra track {index} is neither audio or video.")
 
+    def map_track(track: TrackMetadata) -> str:  # closure
+        track_id = tracker.next(track.codec_type)
+        arguments.extend(
+            [
+                "-map",
+                f"{input_file_index}:{track.identifier}",
+                f"-metadata:s:{track_id}",
+                f"title={track.title}",
+                f"-metadata:s:{track_id}",
+                f"language={track.language}",
+            ]
+        )
+        return track_id
+
     if not no_video:
         best_video = info.best_video()
         if best_video is None:
@@ -465,9 +505,7 @@ def get_encoder_cli(
         )
         first_video_track = True
         for track in video_output_tracks:
-            track_id, video_index = f"v:{video_index}", video_index + 1
-            arguments.extend(["-map", f"{input_file_index}:{track.index}"])
-
+            track_id = map_track(track)
             track_arguments = {
                 "-codec": "libx265",  # HEVC
                 "-crf": str(crf),
@@ -476,21 +514,27 @@ def get_encoder_cli(
             }
             first_video_track = False
             if track.is_hdr():
+                x265_params = [
+                    "repeat-headers=1",
+                    (
+                        "master-display="
+                        + "G(13250,34500)B(7500,3000)R(34000,16000)"
+                        + "WP(15635,16450)L(10000000,1)"
+                    ),
+                ]
+
+                if cll := track.content_light_levels():
+                    x265_params.append(f"max-cll={cll}")
+
                 track_arguments.update(
                     {
                         "-pix_fmt": "yuv420p10le",
                         "-color_primaries": "bt2020",
                         "-colorspace": "bt2020nc",
                         "-color_trc": "smpte2084",
-                        "-x265-params": (
-                            "repeat-headers=1:master-display="
-                            + "G(13250,34500)B(7500,3000)R(34000,16000)"
-                            + "WP(15635,16450)L(10000000,1)"
-                        ),
+                        "-x265-params": ":".join(x265_params),
                     }
                 )
-                if cll := track.content_light_levels():
-                    track_arguments["-max_cll"] = cll
             else:
                 track_arguments.update(
                     {
@@ -539,8 +583,7 @@ def get_encoder_cli(
         for settings, track in audio_output_tracks:
             if track is None:
                 continue
-            track_id, audio_index = f"a:{audio_index}", audio_index + 1
-            arguments.extend(["-map", f"{input_file_index}:{track.index}"])
+            track_id = map_track(track)
 
             track_arguments = {}
             if settings.copy_only:
@@ -565,9 +608,10 @@ def get_encoder_cli(
                 dict_to_args(track_arguments, key_suffix=f":{track_id}")
             )
     if not no_subtitles:
-        arguments.extend(
-            dict_to_args({"-codec:s": "copy", "-map": f"{input_file_index}:s"})
-        )
+        arguments.extend(dict_to_args({"-codec:s": "copy"}))
+        for track in info.subtitle_tracks:
+            track_id = map_track(track)
+
     if not no_chapters:
         arguments.extend(
             dict_to_args({"-map_chapters": str(input_file_index)})
