@@ -399,7 +399,7 @@ class MediaInfo:
             )[
                 0
             ]  # will throw if no stream
-        except KeyError:
+        except IndexError:
             return None
 
     def best_audio(
@@ -415,7 +415,7 @@ class MediaInfo:
                     ),
                     reverse=True,
                 )[0]
-            except KeyError:
+            except IndexError:
                 continue
         return None
 
