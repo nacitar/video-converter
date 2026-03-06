@@ -330,7 +330,7 @@ class MediaInfo:
                     identifier=tracker.next(codec_type),
                     index=int(track["index"]),
                     codec_type=codec_type,
-                    codec_name=str(track["codec_name"]),
+                    codec_name=str(track.get("codec_name") or ""),
                     profile=str(track.get("profile") or ""),
                     title=str(tags.get("title") or ""),
                     language=(
