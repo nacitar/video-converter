@@ -3,13 +3,14 @@ import importlib.metadata
 import json
 import logging
 import subprocess
-from dataclasses import KW_ONLY, dataclass
+from dataclasses import KW_ONLY, dataclass, field
 from functools import cache, cached_property
 from logging import Handler
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from shlex import quote
 from shutil import which
+from types import MappingProxyType
 from typing import Any, Mapping, Sequence, cast
 
 logger = logging.getLogger(__name__)
@@ -284,6 +285,14 @@ class AudioFilter:
 @dataclass(frozen=True)
 class MediaInfo:
     tracks: tuple[TrackMetadata, ...]
+    track_indexes: Mapping[int, TrackMetadata] = field(init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "track_indexes",
+            MappingProxyType({track.index: track for track in self.tracks}),
+        )
 
     @classmethod
     def from_path(cls, path: Path) -> MediaInfo:
@@ -307,6 +316,9 @@ class MediaInfo:
             )
         )
         return MediaInfo(tracks=tracks)
+
+    def track_from_index(self, index: int) -> TrackMetadata:
+        return self.track_indexes[index]
 
     @cached_property
     def video_tracks(self) -> tuple[TrackMetadata, ...]:
@@ -394,6 +406,7 @@ class EncoderSettings:
 def get_encoder_cli(
     input: Path,
     output: Path,
+    extra_av_indexes: list[int] | None = None,
     *,
     crf: int = 22,
     preset: str = "slow",
@@ -402,53 +415,78 @@ def get_encoder_cli(
     no_subtitles: bool = False,
     no_chapters: bool = False,
 ) -> list[str | Path]:
+    if extra_av_indexes is None:
+        extra_av_indexes = []
 
     info = MediaInfo.from_path(input)
     input_file_index = 0  # TODO: assumes only one input file!
     video_index = audio_index = 0  # applies to all inputs, if more added later
     arguments = dict_to_args({"-i": str(input)})
-    track_arguments: dict[str, str]
-    if not no_video:
-        track = info.best_video()
-        if track is None:
-            raise RuntimeError("No video tracks found!")
-        track_id, video_index = f"v:{video_index}", video_index + 1
-        arguments.extend(["-map", f"{input_file_index}:{track.index}"])
 
-        track_arguments = {
-            "-codec": "libx265",  # HEVC
-            "-crf": str(crf),
-            "-preset": preset,
-            "-disposition": "default",
-        }
-        if track.is_hdr():
-            track_arguments.update(
-                {
-                    "-pix_fmt": "yuv420p10le",
-                    "-color_primaries": "bt2020",
-                    "-colorspace": "bt2020nc",
-                    "-color_trc": "smpte2084",
-                    "-x265-params": (
-                        "master-display="
-                        + "G(13250,34500)B(7500,3000)R(34000,16000)"
-                        + "WP(15635,16450)L(10000000,1)"
-                    ),
-                }
-            )
-            if cll := track.content_light_levels():
-                track_arguments["-max_cll"] = cll
+    track_arguments: dict[str, str]
+    track: TrackMetadata | None
+
+    extra_video_tracks: list[TrackMetadata] = []
+    extra_audio_tracks: list[TrackMetadata] = []
+    for index in extra_av_indexes:
+        track = info.track_from_index(index)
+        if track.is_video():
+            extra_video_tracks.append(track)
+        elif track.is_audio():
+            extra_audio_tracks.append(track)
         else:
-            track_arguments.update(
-                {
-                    "-pix_fmt": "yuv420p",
-                    "-color_primaries": "bt709",
-                    "-colorspace": "bt709",
-                    "-color_trc": "bt709",
-                }
-            )
-        arguments.extend(
-            dict_to_args(track_arguments, key_suffix=f":{track_id}")
+            raise ValueError(f"Extra track {index} is neither audio or video.")
+
+    if not no_video:
+        best_video = info.best_video()
+        if best_video is None:
+            raise RuntimeError("No video tracks found!")
+        video_output_tracks: list[TrackMetadata] = [best_video]
+        video_output_tracks.extend(
+            track
+            for track in extra_video_tracks
+            if track not in video_output_tracks
         )
+        first_video_track = True
+        for track in video_output_tracks:
+            track_id, video_index = f"v:{video_index}", video_index + 1
+            arguments.extend(["-map", f"{input_file_index}:{track.index}"])
+
+            track_arguments = {
+                "-codec": "libx265",  # HEVC
+                "-crf": str(crf),
+                "-preset": preset,
+                "-disposition": "default" if first_video_track else "0",
+            }
+            first_video_track = False
+            if track.is_hdr():
+                track_arguments.update(
+                    {
+                        "-pix_fmt": "yuv420p10le",
+                        "-color_primaries": "bt2020",
+                        "-colorspace": "bt2020nc",
+                        "-color_trc": "smpte2084",
+                        "-x265-params": (
+                            "master-display="
+                            + "G(13250,34500)B(7500,3000)R(34000,16000)"
+                            + "WP(15635,16450)L(10000000,1)"
+                        ),
+                    }
+                )
+                if cll := track.content_light_levels():
+                    track_arguments["-max_cll"] = cll
+            else:
+                track_arguments.update(
+                    {
+                        "-pix_fmt": "yuv420p",
+                        "-color_primaries": "bt709",
+                        "-colorspace": "bt709",
+                        "-color_trc": "bt709",
+                    }
+                )
+            arguments.extend(
+                dict_to_args(track_arguments, key_suffix=f":{track_id}")
+            )
 
     if not no_audio:
         audio_best_atmos = info.best_audio([AudioFilter(atmos=True)])
@@ -470,12 +508,19 @@ def get_encoder_cli(
                 logger.warning("5.1 audio to be generated from Atmos source.")
             audio_fallback = None  # not needed; we have 5.1
 
-        first_audio_track = True
-        for settings, track in [
+        audio_output_tracks = [
             (EncoderSettings(channels=6), audio_6ch),
             (EncoderSettings(copy_only=True), audio_best_atmos),
             (EncoderSettings(), audio_fallback),
-        ]:
+        ]
+        audio_output_tracks.extend(
+            (EncoderSettings(), track)
+            for track in extra_audio_tracks
+            if track not in [entry[1] for entry in audio_output_tracks]
+        )
+
+        first_audio_track = True
+        for settings, track in audio_output_tracks:
             if track is None:
                 continue
             track_id, audio_index = f"a:{audio_index}", audio_index + 1
@@ -580,6 +625,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "-o", "--output", type=Path, help="Output media file.", required=True
     )
+    parser.add_argument(
+        "-e",
+        "--extra-av",
+        type=int,
+        action="append",
+        help="Extra audio/video track global index.  Can pass multiple times.",
+    )
+
     args = parser.parse_args(args=argv)
     configure_logging(
         console_level=args.console_level or logging.WARNING,
@@ -599,6 +652,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             get_encoder_cli(
                 args.input,
                 args.output,
+                extra_av_indexes=args.extra_av,
                 crf=args.crf,
                 preset=args.preset,
                 no_video=args.no_video,
