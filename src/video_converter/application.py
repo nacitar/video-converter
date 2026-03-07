@@ -483,6 +483,7 @@ def get_encoder_cli(
             "-map_metadata:p": "-1",
         }
     )
+    title_arguments: dict[str, str] = {}
 
     track_arguments: dict[str, str]
     track: TrackMetadata | None
@@ -502,9 +503,7 @@ def get_encoder_cli(
         track_id = tracker.next(track.codec_type)
         arguments.extend(["-map", f"{input_file_index}:{track.identifier}"])
         if track.title:
-            arguments.extend(
-                [f"-metadata:s:{track_id}", f"title={track.title}"]
-            )
+            title_arguments[f"-metadata:s:{track_id}"] = f"title={track.title}"
         if track.language:
             arguments.extend(
                 [f"-metadata:s:{track_id}", f"language={track.language}"]
@@ -673,6 +672,7 @@ def get_encoder_cli(
         arguments.extend(
             dict_to_args({"-map_chapters": str(input_file_index)})
         )
+    arguments.extend(dict_to_args(title_arguments))
 
     return [
         cli_tool("ffmpeg"),
