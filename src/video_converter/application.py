@@ -267,7 +267,12 @@ class TrackMetadata:
 
     def __str__(self) -> str:
         return pretty_dataclass_str(
-            self, extra={"is_hdr": self.is_hdr(), "is_2160p": self.is_2160p()}
+            self,
+            extra={
+                "is_hdr": self.is_hdr(),
+                "is_2160p": self.is_2160p(),
+                "is_atmos": self.is_atmos(),
+            },
         )
 
 
@@ -276,6 +281,7 @@ class AudioFilter:
     atmos: bool | None = None
     channel_min: int | None = None
     channel_max: int | None = None
+    language: str|None = None
 
 
 @dataclass
@@ -446,6 +452,10 @@ class MediaInfo:
                 filter.channel_max is None
                 or track.channels <= filter.channel_max
             )
+            and (
+                filter.language is None
+                or track.language == filter.language
+            )
         ]
 
 
@@ -464,6 +474,7 @@ def get_encoder_cli(
     preset: str = "slow",
     copy_video: bool = False,
     no_video: bool = False,
+    audio_languages: list[str]|None = None,
     copy_audio: bool = False,
     no_audio: bool = False,
     no_subtitles: bool = False,
@@ -471,6 +482,8 @@ def get_encoder_cli(
 ) -> list[str | Path]:
     if extra_av_indexes is None:
         extra_av_indexes = []
+    if audio_languages is None:
+        audio_languages = []
 
     info = MediaInfo.from_path(input)
     input_file_index = 0  # TODO: assumes only one input file!
@@ -574,88 +587,98 @@ def get_encoder_cli(
             )
 
     if not no_audio:
-        audio_best_atmos = info.best_audio([AudioFilter(atmos=True)])
-        audio_best_non_atmos = info.best_audio([AudioFilter(atmos=False)])
-        if (
-            audio_best_non_atmos is not None
-            and audio_best_non_atmos.channels <= 6
-        ):
-            audio_best_non_atmos = None  # not better than 6ch, already covered
-
-        audio_6ch = info.best_audio(
-            [
-                AudioFilter(atmos=False, channel_min=6, channel_max=6),
-                AudioFilter(atmos=False, channel_min=6),
-                AudioFilter(atmos=True, channel_min=6, channel_max=6),
-                AudioFilter(atmos=True, channel_min=6),
-            ]
-        )
-        if audio_6ch is None:
-            logger.warning("no 5.1+ audio source found; audio won't be 5.1!")
-            audio_fallback = (
-                info.best_audio([AudioFilter(atmos=False)]) or audio_best_atmos
-            )
-        else:
-            if audio_6ch.is_atmos():
-                logger.warning("5.1 audio to be generated from Atmos source.")
-            audio_fallback = None  # not needed; we have 5.1
-
-        audio_output_tracks = [
-            (EncoderSettings(copy_only=copy_audio, channels=6), audio_6ch),
-            (EncoderSettings(copy_only=copy_audio), audio_best_non_atmos),
-            (EncoderSettings(copy_only=True), audio_best_atmos),
-            (EncoderSettings(copy_only=copy_audio), audio_fallback),
-        ]
-        audio_output_tracks.extend(
-            (EncoderSettings(copy_only=copy_audio), track)
-            for track in extra_audio_tracks
-            if track not in [entry[1] for entry in audio_output_tracks]
-        )
-
         first_audio_track = True
-        for settings, track in audio_output_tracks:
-            if track is None:
-                continue
-            track_id = map_track(track)
-            track_arguments = {
-                "-disposition": "default" if first_audio_track else "0"
-            }
-            first_audio_track = False
-            if settings.copy_only:
-                track_arguments["-codec"] = "copy"
-            else:
-                if (
-                    settings.channels is not None
-                    and settings.channels != track.channels
-                ):
-                    channels = settings.channels
-                else:
-                    channels = track.channels
-                if channels > 6:
-                    track_arguments.update(
-                        {
-                            "-codec": "libopus",
-                            "-ac": str(channels),
-                            "-b": f"{channels * 80}k",
-                        }
-                    )
-                else:
-                    track_arguments.update(
-                        {
-                            "-codec": "eac3",
-                            "-ac": str(channels),
-                            "-b": f"{channels * 112}k",
-                        }
-                    )
-            arguments.extend(
-                dict_to_args(track_arguments, key_suffix=f":{track_id}")
+        for language in audio_languages:
+            any_audio_this_language = False
+            audio_best_atmos = info.best_audio([AudioFilter(atmos=True, language=language)])
+            audio_best_non_atmos = info.best_audio([AudioFilter(atmos=False, language=language)])
+            if (
+                audio_best_non_atmos is not None
+                and audio_best_non_atmos.channels <= 6
+            ):
+                audio_best_non_atmos = None  # not better than 6ch, already covered
+
+            audio_6ch = info.best_audio(
+                [
+                    AudioFilter(atmos=False, channel_min=6, channel_max=6, language=language),
+                    AudioFilter(atmos=False, channel_min=6, language=language),
+                    AudioFilter(atmos=True, channel_min=6, channel_max=6, language=language),
+                    AudioFilter(atmos=True, channel_min=6, language=language),
+                ]
             )
+            if audio_6ch is None:
+                logger.warning("no 5.1+ audio source found; audio won't be 5.1!")
+                audio_fallback = (
+                    info.best_audio([AudioFilter(atmos=False)]) or audio_best_atmos
+                )
+            else:
+                if audio_6ch.is_atmos():
+                    logger.warning("5.1 audio to be generated from Atmos source.")
+                audio_fallback = None  # not needed; we have 5.1
+
+            audio_output_tracks = [
+                (EncoderSettings(copy_only=copy_audio, channels=6), audio_6ch),
+                (EncoderSettings(copy_only=copy_audio), audio_best_non_atmos),
+                (EncoderSettings(copy_only=True), audio_best_atmos),
+                (EncoderSettings(copy_only=copy_audio), audio_fallback),
+            ]
+            audio_output_tracks.extend(
+                (EncoderSettings(copy_only=copy_audio), track)
+                for track in extra_audio_tracks
+                if track not in [entry[1] for entry in audio_output_tracks]
+            )
+
+            for settings, track in audio_output_tracks:
+                if track is None:
+                    continue
+                track_id = map_track(track)
+                track_arguments = {
+                    "-disposition": "default" if first_audio_track else "0"
+                }
+                first_audio_track = False
+                any_audio_this_language = True
+                if settings.copy_only:
+                    track_arguments["-codec"] = "copy"
+                else:
+                    if (
+                        settings.channels is not None
+                        and settings.channels != track.channels
+                    ):
+                        channels = settings.channels
+                    else:
+                        channels = track.channels
+                    if channels > 6:
+                        track_arguments.update(
+                            {
+                                "-codec": "libopus",
+                                "-ac": str(channels),
+                                "-b": f"{channels * 80}k",
+                            }
+                        )
+                    else:
+                        track_arguments.update(
+                            {
+                                "-codec": "eac3",
+                                "-ac": str(channels),
+                                "-b": f"{channels * 112}k",
+                            }
+                        )
+                arguments.extend(
+                    dict_to_args(track_arguments, key_suffix=f":{track_id}")
+                )
+            if not any_audio_this_language:
+                logger.warning(f"No audio selected for language: {language}")
+        if first_audio_track:
+            raise RuntimeError("No audio tracks included!")
     if not no_subtitles:
-        arguments.extend(dict_to_args({"-codec:s": "copy"}))
         first_english_subtitle_track = True
         for track in info.subtitle_tracks:
             track_id = map_track(track)
             track_arguments = {}
+            if track.codec_name.casefold() == "mov_text":
+                track_arguments["-codec"] = "srt"  # convert!
+            else:
+                track_arguments["-codec"] = "copy"
             if (
                 first_english_subtitle_track
                 and track.language.casefold() == "eng"
@@ -741,6 +764,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--no-video", action="store_true", help="Don't include video tracks."
     )
     convert.add_argument(
+        "--audio-language", action="append", default=None, help="The desired audio language(s).  Can pass multiple times."
+    )
+    convert.add_argument(
         "--copy-audio",
         action="store_true",
         help="Don't re-encode audio tracks.",
@@ -779,6 +805,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         ),
     )
+    if args.audio_language is None:
+        args.audio_language = ["eng"]
     if args.command == "probe":
         info = MediaInfo.from_path(args.input)
         for track in info.tracks:
@@ -795,6 +823,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     preset=args.preset,
                     copy_video=args.copy_video,
                     no_video=args.no_video,
+                    audio_languages=args.audio_language,
                     copy_audio=args.copy_audio,
                     no_audio=args.no_audio,
                     no_subtitles=args.no_subtitles,
