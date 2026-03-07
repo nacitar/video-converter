@@ -217,14 +217,10 @@ class TrackMetadata:
 
     def is_2160p(self) -> bool:
         # NOTE: can be UHD 3840x2160 or DCI 4096x2160
-        return self.is_video() and self.height == 2160
-
-    def is_cropped_2160p(self) -> bool:
-        # NOTE: can be UHD 3840x2160 or DCI 4096x2160
         return (
             self.is_video()
-            and self.width in (3840, 4096)
-            and self.height < 2160
+            and self.height == 2160
+            or (self.width in (3840, 4096) and self.height < 2160)
         )
 
     def is_atmos(self) -> bool:
@@ -271,12 +267,7 @@ class TrackMetadata:
 
     def __str__(self) -> str:
         return pretty_dataclass_str(
-            self,
-            extra={
-                "is_hdr": self.is_hdr(),
-                "is_2160p": self.is_2160p(),
-                "is_cropped_2160p": self.is_cropped_2160p(),
-            },
+            self, extra={"is_hdr": self.is_hdr(), "is_2160p": self.is_2160p()}
         )
 
 
