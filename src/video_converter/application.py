@@ -141,11 +141,17 @@ class TrackMetadata:
     height: int
     side_data_list: tuple[SideData, ...]
 
+    def is_visual_type(self) -> bool:
+        return self.codec_type.casefold() == "video"
+
     def is_video(self) -> bool:
-        return (
-            self.codec_type.casefold() == "video"
-            and self.codec_name.casefold() != "mjpeg"
-        )
+        return self.is_visual_type() and self.codec_name.casefold() not in [
+            "mjpeg",
+            "png",
+            "gif",
+            "jpg",
+            "jpeg",
+        ]
 
     def is_audio(self) -> bool:
         return self.codec_type.casefold() == "audio"
@@ -266,14 +272,56 @@ class TrackMetadata:
         return 10
 
     def __str__(self) -> str:
-        return pretty_dataclass_str(
-            self,
-            extra={
-                "is_hdr": self.is_hdr(),
-                "is_2160p": self.is_2160p(),
-                "is_atmos": self.is_atmos(),
-            },
+        indicator: list[str] = [str(self.index), self.identifier]
+        info: list[str] = [
+            value
+            for value in [
+                self.language.upper() if self.language else "",
+                " ".join(
+                    value
+                    for value in [self.codec_name.upper(), self.profile]
+                    if value
+                ),
+                f"{self.channels}ch" if self.channels else "",
+                "Atmos" if self.is_atmos() else "",
+                (
+                    "2160p"
+                    if self.is_2160p()
+                    else (
+                        f"{self.width}x{self.height}"
+                        if self.is_visual_type()
+                        else ""
+                    )
+                ),
+                (
+                    "HDR10+"
+                    if self.is_hdr10plus()
+                    else (
+                        "HDR10"
+                        if self.is_hdr10()
+                        else (
+                            "HDR"
+                            if self.is_hdr()
+                            else "SDR" if self.is_video() else ""
+                        )
+                    )
+                ),
+            ]
+            if value
+        ]
+
+        logger.info(
+            pretty_dataclass_str(
+                self,
+                extra={
+                    "is_hdr": self.is_hdr(),
+                    "is_2160p": self.is_2160p(),
+                    "is_atmos": self.is_atmos(),
+                },
+            )
         )
+
+        return f"#{' '.join(indicator)}: [{', '.join(info)}] {self.title}"
 
 
 @dataclass
@@ -281,7 +329,7 @@ class AudioFilter:
     atmos: bool | None = None
     channel_min: int | None = None
     channel_max: int | None = None
-    language: str|None = None
+    language: str | None = None
 
 
 @dataclass
@@ -452,10 +500,7 @@ class MediaInfo:
                 filter.channel_max is None
                 or track.channels <= filter.channel_max
             )
-            and (
-                filter.language is None
-                or track.language == filter.language
-            )
+            and (filter.language is None or track.language == filter.language)
         ]
 
 
@@ -474,7 +519,7 @@ def get_encoder_cli(
     preset: str = "slow",
     copy_video: bool = False,
     no_video: bool = False,
-    audio_languages: list[str]|None = None,
+    audio_languages: list[str] | None = None,
     copy_audio: bool = False,
     no_audio: bool = False,
     no_subtitles: bool = False,
@@ -590,30 +635,51 @@ def get_encoder_cli(
         first_audio_track = True
         for language in audio_languages:
             any_audio_this_language = False
-            audio_best_atmos = info.best_audio([AudioFilter(atmos=True, language=language)])
-            audio_best_non_atmos = info.best_audio([AudioFilter(atmos=False, language=language)])
+            audio_best_atmos = info.best_audio(
+                [AudioFilter(atmos=True, language=language)]
+            )
+            audio_best_non_atmos = info.best_audio(
+                [AudioFilter(atmos=False, language=language)]
+            )
             if (
                 audio_best_non_atmos is not None
                 and audio_best_non_atmos.channels <= 6
             ):
-                audio_best_non_atmos = None  # not better than 6ch, already covered
+                audio_best_non_atmos = (
+                    None  # not better than 6ch, already covered
+                )
 
             audio_6ch = info.best_audio(
                 [
-                    AudioFilter(atmos=False, channel_min=6, channel_max=6, language=language),
+                    AudioFilter(
+                        atmos=False,
+                        channel_min=6,
+                        channel_max=6,
+                        language=language,
+                    ),
                     AudioFilter(atmos=False, channel_min=6, language=language),
-                    AudioFilter(atmos=True, channel_min=6, channel_max=6, language=language),
+                    AudioFilter(
+                        atmos=True,
+                        channel_min=6,
+                        channel_max=6,
+                        language=language,
+                    ),
                     AudioFilter(atmos=True, channel_min=6, language=language),
                 ]
             )
             if audio_6ch is None:
-                logger.warning("no 5.1+ audio source found; audio won't be 5.1!")
+                logger.warning(
+                    "no 5.1+ audio source found; audio won't be 5.1!"
+                )
                 audio_fallback = (
-                    info.best_audio([AudioFilter(atmos=False)]) or audio_best_atmos
+                    info.best_audio([AudioFilter(atmos=False)])
+                    or audio_best_atmos
                 )
             else:
                 if audio_6ch.is_atmos():
-                    logger.warning("5.1 audio to be generated from Atmos source.")
+                    logger.warning(
+                        "5.1 audio to be generated from Atmos source."
+                    )
                 audio_fallback = None  # not needed; we have 5.1
 
             audio_output_tracks = [
@@ -745,6 +811,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("input", type=Path, help="Input media file.")
     sub = parser.add_subparsers(dest="command", required=True)
+
     sub.add_parser("probe", help="Probe media.")  # NO VAR
 
     convert = sub.add_parser("convert", help="Convert media.")
@@ -764,7 +831,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--no-video", action="store_true", help="Don't include video tracks."
     )
     convert.add_argument(
-        "--audio-language", action="append", default=None, help="The desired audio language(s).  Can pass multiple times."
+        "--audio-language",
+        action="append",
+        default=None,
+        help="The desired audio language(s).  Can pass multiple times.",
     )
     convert.add_argument(
         "--copy-audio",
@@ -805,14 +875,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         ),
     )
-    if args.audio_language is None:
-        args.audio_language = ["eng"]
     if args.command == "probe":
         info = MediaInfo.from_path(args.input)
+        print(args.input.name)
         for track in info.tracks:
-            print(track)
-            print()
+            print(f"- {track}")
     elif args.command == "convert":
+        if args.audio_language is None:
+            args.audio_language = ["eng"]
         print(
             cli_string(
                 get_encoder_cli(
