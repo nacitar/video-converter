@@ -221,13 +221,32 @@ class TrackMetadata:
             and not self.is_subtitle()
         )
 
-    def is_2160p(self) -> bool:
-        # NOTE: can be UHD 3840x2160 or DCI 4096x2160
-        return (
-            self.is_video()
-            and self.height == 2160
-            or (self.width in (3840, 4096) and self.height < 2160)
-        )
+    def resolution_label(self) -> str:
+        if self.is_visual_type():
+            if self.width in (3840, 3996, 4096) and self.height <= 2160:
+                return "2160p"
+            if self.width == 1920 and self.height <= 1080:
+                return "1080p"
+            if self.width == 1280 and self.height <= 720:
+                return "720p"
+            return f"{self.width}x{self.height}"
+        return ""
+
+    def hdr_label(self) -> str:
+        label = []
+        if self.is_hdr10plus():
+            label.append("HDR10+")
+        elif self.is_hdr10():
+            label.append("HDR10")
+        elif self.is_hdr():
+            label.append("HDR")
+        elif self.is_video():
+            label.append("SDR")
+
+        if self.is_dolby_vision():
+            label.append("DV")
+
+        return " ".join(label)
 
     def is_atmos(self) -> bool:
         profile = self.profile.casefold()
@@ -284,28 +303,8 @@ class TrackMetadata:
                 ),
                 f"{self.channels}ch" if self.channels else "",
                 "Atmos" if self.is_atmos() else "",
-                (
-                    "2160p"
-                    if self.is_2160p()
-                    else (
-                        f"{self.width}x{self.height}"
-                        if self.is_visual_type()
-                        else ""
-                    )
-                ),
-                (
-                    "HDR10+"
-                    if self.is_hdr10plus()
-                    else (
-                        "HDR10"
-                        if self.is_hdr10()
-                        else (
-                            "HDR"
-                            if self.is_hdr()
-                            else "SDR" if self.is_video() else ""
-                        )
-                    )
-                ),
+                self.resolution_label(),
+                self.hdr_label(),
             ]
             if value
         ]
@@ -314,8 +313,8 @@ class TrackMetadata:
             pretty_dataclass_str(
                 self,
                 extra={
-                    "is_hdr": self.is_hdr(),
-                    "is_2160p": self.is_2160p(),
+                    "hdr_label": self.hdr_label(),
+                    "resolution_label": self.resolution_label(),
                     "is_atmos": self.is_atmos(),
                 },
             )
@@ -524,7 +523,7 @@ def get_encoder_cli(
     no_audio: bool = False,
     no_subtitles: bool = False,
     no_chapters: bool = False,
-) -> list[str | Path]:
+) -> tuple[list[TrackMetadata], list[str | Path]]:
     if extra_av_indexes is None:
         extra_av_indexes = []
     if audio_languages is None:
@@ -548,6 +547,8 @@ def get_encoder_cli(
 
     extra_video_tracks: list[TrackMetadata] = []
     extra_audio_tracks: list[TrackMetadata] = []
+
+    tracks_in_output: list[TrackMetadata] = []
     for index in extra_av_indexes:
         track = info.track_from_index(index)
         if track.is_video():
@@ -580,6 +581,7 @@ def get_encoder_cli(
         )
         first_video_track = True
         for track in video_output_tracks:
+            tracks_in_output.append(track)
             track_id = map_track(track)
 
             track_arguments = {
@@ -697,6 +699,7 @@ def get_encoder_cli(
             for settings, track in audio_output_tracks:
                 if track is None:
                     continue
+                tracks_in_output.append(track)
                 track_id = map_track(track)
                 track_arguments = {
                     "-disposition": "default" if first_audio_track else "0"
@@ -739,6 +742,7 @@ def get_encoder_cli(
     if not no_subtitles:
         first_english_subtitle_track = True
         for track in info.subtitle_tracks:
+            tracks_in_output.append(track)
             track_id = map_track(track)
             track_arguments = {}
             if track.codec_name.casefold() == "mov_text":
@@ -763,14 +767,17 @@ def get_encoder_cli(
         )
     arguments.extend(dict_to_args(title_arguments))
 
-    return [
-        cli_tool("ffmpeg"),
-        "-stats",
-        "-loglevel",
-        "error",
-        *arguments,
-        output,
-    ]
+    return (
+        tracks_in_output,
+        [
+            cli_tool("ffmpeg"),
+            "-stats",
+            "-loglevel",
+            "error",
+            *arguments,
+            output,
+        ],
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -883,22 +890,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.command == "convert":
         if args.audio_language is None:
             args.audio_language = ["eng"]
-        print(
-            cli_string(
-                get_encoder_cli(
-                    args.input,
-                    args.output,
-                    extra_av_indexes=args.extra_av,
-                    crf=args.crf,
-                    preset=args.preset,
-                    copy_video=args.copy_video,
-                    no_video=args.no_video,
-                    audio_languages=args.audio_language,
-                    copy_audio=args.copy_audio,
-                    no_audio=args.no_audio,
-                    no_subtitles=args.no_subtitles,
-                    no_chapters=args.no_chapters,
-                )
-            )
+
+        tracks_in_output, encoder_cli = get_encoder_cli(
+            args.input,
+            args.output,
+            extra_av_indexes=args.extra_av,
+            crf=args.crf,
+            preset=args.preset,
+            copy_video=args.copy_video,
+            no_video=args.no_video,
+            audio_languages=args.audio_language,
+            copy_audio=args.copy_audio,
+            no_audio=args.no_audio,
+            no_subtitles=args.no_subtitles,
+            no_chapters=args.no_chapters,
         )
+        print(f"Processing: {args.input}")
+        for track in tracks_in_output:
+            print(f"- {track}")
+        print()
+        print(cli_string(encoder_cli))
     return 0
