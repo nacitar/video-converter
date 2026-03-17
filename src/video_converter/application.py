@@ -221,22 +221,33 @@ class TrackMetadata:
             and not self.is_subtitle()
         )
 
+    def near_resolution(
+        self, target_width: int, target_height: int, *, width_tol: float = 0.1
+    ) -> bool:
+        return (
+            self.height <= target_height
+            and abs(self.width - target_width) <= target_width * width_tol
+        )
+
     def resolution_label(self) -> str:
         if self.is_visual_type():
-            if self.width in (3840, 3996, 4096) and self.height <= 2160:
+            if any(
+                self.near_resolution(width, 2160)
+                for width in (3840, 3996, 4096)
+            ):
                 return "2160p"
-            if self.width == 1920 and self.height <= 1080:
+            if self.near_resolution(1920, 1080):
                 return "1080p"
-            if self.width == 1280 and self.height <= 720:
+            if self.near_resolution(1280, 720):
                 return "720p"
             return f"{self.width}x{self.height}"
         return ""
 
-    def hdr_label(self) -> str:
+    def hdr_label(self, *, simple: bool = False) -> str:
         label = []
-        if self.is_hdr10plus():
+        if not simple and self.is_hdr10plus():
             label.append("HDR10+")
-        elif self.is_hdr10():
+        elif not simple and self.is_hdr10():
             label.append("HDR10")
         elif self.is_hdr():
             label.append("HDR")
@@ -449,6 +460,15 @@ class MediaInfo:
     def subtitle_tracks(self) -> tuple[TrackMetadata, ...]:
         return tuple([track for track in self.tracks if track.is_subtitle()])
 
+    @classmethod
+    def subtitle_language_sort_key(cls, track: TrackMetadata) -> int:
+        language = (track.language or "").casefold()
+        if language == "eng":
+            return 0
+        if language == "":
+            return 1
+        return 3
+
     @cached_property
     def other_tracks(self) -> tuple[TrackMetadata, ...]:
         return tuple([track for track in self.tracks if track.is_other()])
@@ -512,8 +532,9 @@ class EncoderSettings:
 def get_encoder_cli(
     input: Path,
     output: Path,
-    extra_av_indexes: list[int] | None = None,
     *,
+    append_label: bool = False,
+    extra_av_indexes: list[int] | None = None,
     crf: int = 22,
     preset: str = "slow",
     copy_video: bool = False,
@@ -573,6 +594,20 @@ def get_encoder_cli(
         best_video = info.best_video()
         if best_video is None:
             raise RuntimeError("No video tracks found!")
+        if append_label:
+            label = " ".join(
+                [
+                    label
+                    for label in [
+                        best_video.resolution_label(),
+                        best_video.hdr_label(simple=True),
+                    ]
+                    if label
+                ]
+            )
+            if label:
+                label = f" [{label}]"
+            output = output.parent / (output.stem + label + output.suffix)
         video_output_tracks: list[TrackMetadata] = [best_video]
         video_output_tracks.extend(
             track
@@ -741,7 +776,9 @@ def get_encoder_cli(
             raise RuntimeError("No audio tracks included!")
     if not no_subtitles:
         first_english_subtitle_track = True
-        for track in info.subtitle_tracks:
+        for track in sorted(
+            info.subtitle_tracks, key=MediaInfo.subtitle_language_sort_key
+        ):
             tracks_in_output.append(track)
             track_id = map_track(track)
             track_arguments = {}
@@ -861,6 +898,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "-o", "--output", type=Path, help="Output media file.", required=True
     )
     convert.add_argument(
+        "-a",
+        "--append-label",
+        action="store_true",
+        help="Append a format related label to the output filename.",
+    )
+    convert.add_argument(
         "-e",
         "--extra-av",
         type=int,
@@ -894,6 +937,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         tracks_in_output, encoder_cli = get_encoder_cli(
             args.input,
             args.output,
+            append_label=args.append_label,
             extra_av_indexes=args.extra_av,
             crf=args.crf,
             preset=args.preset,
