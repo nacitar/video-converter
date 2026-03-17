@@ -254,7 +254,7 @@ class TrackMetadata:
         elif self.is_video():
             label.append("SDR")
 
-        if self.is_dolby_vision():
+        if not simple and self.is_dolby_vision():
             label.append("DV")
 
         return " ".join(label)
