@@ -1,8 +1,12 @@
+from __future__ import annotations
+
 import logging
-from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from .application import main as application_main
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 logger = logging.getLogger(__name__)
 
 
