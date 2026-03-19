@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import importlib.metadata
 import json
@@ -15,12 +17,12 @@ from shutil import which
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
-    from typing import Mapping, Sequence
+    from collections.abc import Mapping, Sequence
 
     from _typeshed import DataclassInstance
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -77,14 +79,15 @@ def configure_logging(
         )
         logging.getLogger().addHandler(file_handler)
     logging.getLogger().setLevel(global_level)
-    logging.info("logging configured")
+    logger.info("logging configured")
 
 
 @cache
 def cli_tool(name: str) -> Path:
     path = which(name)
     if not path:
-        raise RuntimeError(f"Required tool not found in path: {name}")
+        msg = f"Required tool not found in path: {name}"
+        raise RuntimeError(msg)
     return Path(path)
 
 
@@ -261,10 +264,8 @@ class TrackMetadata:
 
     def is_atmos(self) -> bool:
         profile = self.profile.casefold()
-        return (
-            self.is_audio()
-            and "dolby atmos" in profile
-            or (self.codec_name.casefold() == "eac3" and "joc" in profile)
+        return (self.is_audio() and "dolby atmos" in profile) or (
+            self.codec_name.casefold() == "eac3" and "joc" in profile
         )
 
     def audio_codec_score(self) -> int:
@@ -398,8 +399,9 @@ class MediaInfo:
             data["streams"], key=lambda stream: int(stream["index"])
         ):
             if not isinstance(track, dict):
-                raise TypeError(f"track is not a dict: {track}")
-            tags = cast(dict[str, Any], track.get("tags") or {})
+                msg = f"track is not a dict: {track}"
+                raise TypeError(msg)
+            tags = cast("dict[str, Any]", track.get("tags") or {})
             codec_type = str(track["codec_type"])
             tracks.append(
                 TrackMetadata(
@@ -490,10 +492,10 @@ class MediaInfo:
     def best_audio(
         self, priority_filters: list[AudioFilter]
     ) -> TrackMetadata | None:
-        for filter in priority_filters:
+        for audio_filter in priority_filters:
             try:
                 return sorted(
-                    self.audio_tracks_filtered(filter),
+                    self.audio_tracks_filtered(audio_filter),
                     key=lambda track: (
                         track.channels,
                         track.audio_codec_score(),
@@ -505,21 +507,27 @@ class MediaInfo:
         return None
 
     def audio_tracks_filtered(
-        self, filter: AudioFilter
+        self, audio_filter: AudioFilter
     ) -> list[TrackMetadata]:
         return [
             track
             for track in self.audio_tracks
-            if (filter.atmos is None or filter.atmos == track.is_atmos())
-            and (
-                filter.channel_min is None
-                or track.channels >= filter.channel_min
+            if (
+                audio_filter.atmos is None
+                or audio_filter.atmos == track.is_atmos()
             )
             and (
-                filter.channel_max is None
-                or track.channels <= filter.channel_max
+                audio_filter.channel_min is None
+                or track.channels >= audio_filter.channel_min
             )
-            and (filter.language is None or track.language == filter.language)
+            and (
+                audio_filter.channel_max is None
+                or track.channels <= audio_filter.channel_max
+            )
+            and (
+                audio_filter.language is None
+                or track.language == audio_filter.language
+            )
         ]
 
 
@@ -530,7 +538,7 @@ class EncoderSettings:
 
 
 def get_encoder_cli(
-    input: Path,
+    source: Path,
     output: Path,
     *,
     append_label: bool = False,
@@ -550,12 +558,12 @@ def get_encoder_cli(
     if audio_languages is None:
         audio_languages = []
 
-    info = MediaInfo.from_path(input)
-    input_file_index = 0  # TODO: assumes only one input file!
+    info = MediaInfo.from_path(source)
+    source_file_index = 0  # NOTE: assumes only one source file!
     tracker = IdentifierTracker()
     arguments = dict_to_args(
         {
-            "-i": str(input),
+            "-i": str(source),
             "-map_metadata:g": "-1",
             "-map_metadata:s": "-1",
             "-map_metadata:p": "-1",
@@ -577,11 +585,12 @@ def get_encoder_cli(
         elif track.is_audio():
             extra_audio_tracks.append(track)
         else:
-            raise ValueError(f"Extra track {index} is neither audio or video.")
+            msg = f"Extra track {index} is neither audio or video."
+            raise ValueError(msg)
 
     def map_track(track: TrackMetadata) -> str:  # closure
         track_id = tracker.next(track.codec_type)
-        arguments.extend(["-map", f"{input_file_index}:{track.identifier}"])
+        arguments.extend(["-map", f"{source_file_index}:{track.identifier}"])
         if track.title:
             title_arguments[f"-metadata:s:{track_id}"] = f"title={track.title}"
         if track.language:
@@ -593,7 +602,8 @@ def get_encoder_cli(
     if not no_video:
         best_video = info.best_video()
         if best_video is None:
-            raise RuntimeError("No video tracks found!")
+            msg = "No video tracks found!"
+            raise RuntimeError(msg)
         if append_label:
             label = " ".join(
                 [
@@ -638,8 +648,8 @@ def get_encoder_cli(
                         "repeat-headers=1",
                         (
                             "master-display="
-                            + "G(13250,34500)B(7500,3000)R(34000,16000)"
-                            + "WP(15635,16450)L(10000000,1)"
+                            "G(13250,34500)B(7500,3000)R(34000,16000)"
+                            "WP(15635,16450)L(10000000,1)"
                         ),
                     ]
 
@@ -670,6 +680,7 @@ def get_encoder_cli(
 
     if not no_audio:
         first_audio_track = True
+        channels_5_1 = 6
         for language in audio_languages:
             any_audio_this_language = False
             audio_best_atmos = info.best_audio(
@@ -680,31 +691,35 @@ def get_encoder_cli(
             )
             if (
                 audio_best_non_atmos is not None
-                and audio_best_non_atmos.channels <= 6
+                and audio_best_non_atmos.channels <= channels_5_1
             ):
-                audio_best_non_atmos = (
-                    None  # not better than 6ch, already covered
-                )
+                audio_best_non_atmos = None  # not better, already covered
 
-            audio_6ch = info.best_audio(
+            audio_5_1 = info.best_audio(
                 [
                     AudioFilter(
                         atmos=False,
-                        channel_min=6,
-                        channel_max=6,
+                        channel_min=channels_5_1,
+                        channel_max=channels_5_1,
                         language=language,
                     ),
-                    AudioFilter(atmos=False, channel_min=6, language=language),
+                    AudioFilter(
+                        atmos=False,
+                        channel_min=channels_5_1,
+                        language=language,
+                    ),
                     AudioFilter(
                         atmos=True,
-                        channel_min=6,
-                        channel_max=6,
+                        channel_min=channels_5_1,
+                        channel_max=channels_5_1,
                         language=language,
                     ),
-                    AudioFilter(atmos=True, channel_min=6, language=language),
+                    AudioFilter(
+                        atmos=True, channel_min=channels_5_1, language=language
+                    ),
                 ]
             )
-            if audio_6ch is None:
+            if audio_5_1 is None:
                 logger.warning(
                     "no 5.1+ audio source found; audio won't be 5.1!"
                 )
@@ -713,14 +728,19 @@ def get_encoder_cli(
                     or audio_best_atmos
                 )
             else:
-                if audio_6ch.is_atmos():
+                if audio_5_1.is_atmos():
                     logger.warning(
                         "5.1 audio to be generated from Atmos source."
                     )
                 audio_fallback = None  # not needed; we have 5.1
 
             audio_output_tracks = [
-                (EncoderSettings(copy_only=copy_audio, channels=6), audio_6ch),
+                (
+                    EncoderSettings(
+                        copy_only=copy_audio, channels=channels_5_1
+                    ),
+                    audio_5_1,
+                ),
                 (EncoderSettings(copy_only=copy_audio), audio_best_non_atmos),
                 (EncoderSettings(copy_only=True), audio_best_atmos),
                 (EncoderSettings(copy_only=copy_audio), audio_fallback),
@@ -751,7 +771,7 @@ def get_encoder_cli(
                         channels = settings.channels
                     else:
                         channels = track.channels
-                    if channels > 6:
+                    if channels > channels_5_1:
                         track_arguments.update(
                             {
                                 "-codec": "libopus",
@@ -773,7 +793,8 @@ def get_encoder_cli(
             if not any_audio_this_language:
                 logger.warning(f"No audio selected for language: {language}")
         if first_audio_track:
-            raise RuntimeError("No audio tracks included!")
+            msg = "No audio tracks included!"
+            raise RuntimeError(msg)
     if not no_subtitles:
         first_english_subtitle_track = True
         for track in sorted(
@@ -800,7 +821,7 @@ def get_encoder_cli(
 
     if not no_chapters:
         arguments.extend(
-            dict_to_args({"-map_chapters": str(input_file_index)})
+            dict_to_args({"-map_chapters": str(source_file_index)})
         )
     arguments.extend(dict_to_args(title_arguments))
 
@@ -853,7 +874,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         const=logging.DEBUG,
         help="Maximizes console log verbosity to DEBUG.  Overrides -v and -q.",
     )
-    parser.add_argument("input", type=Path, help="Input media file.")
+    parser.add_argument("source", type=Path, help="Source media file.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("probe", help="Probe media.")  # NO VAR
@@ -921,13 +942,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 path=Path(args.log_file),
                 max_kb=512,  # 0 for unbounded size and no rotation
                 backup_count=1,  # 0 for no rolling backups
-                # append=False
             )
         ),
     )
     if args.command == "probe":
-        info = MediaInfo.from_path(args.input)
-        print(args.input.name)
+        info = MediaInfo.from_path(args.source)
+        print(args.source.name)
         for track in info.tracks:
             print(f"- {track}")
     elif args.command == "convert":
@@ -935,7 +955,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.audio_language = ["eng"]
 
         tracks_in_output, encoder_cli = get_encoder_cli(
-            args.input,
+            args.source,
             args.output,
             append_label=args.append_label,
             extra_av_indexes=args.extra_av,
@@ -949,7 +969,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             no_subtitles=args.no_subtitles,
             no_chapters=args.no_chapters,
         )
-        print(f"Processing: {args.input}")
+        print(f"Processing: {args.source}")
         for track in tracks_in_output:
             print(f"- {track}")
         print()

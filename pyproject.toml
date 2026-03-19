@@ -15,10 +15,9 @@ packages = [{include = "video_converter", from = "src"}]
 
 [tool.poetry.group.dev.dependencies]
 black = "^25.12.0"
-flake8 = "^7.3.0"
-isort = "^6.1.0"
-mypy = "^1.19.1"
+mypy = "^1.19.0"
 pytest = "^8.4.2"
+ruff = "^0.14.8"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
@@ -40,3 +39,21 @@ video-converter = "video_converter.__main__:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 79
+
+[tool.ruff.lint]
+extend-ignore = ["E203", "E501", "COM812", "COM819"]
+select = [
+    "E", "F", "N", "UP", "ANN", "TCH", "TC",
+    "A", "I", "C4", "B", "SIM", "PERF", "PTH", "RET", "TRY", "Q",
+    "RUF", "DTZ", "ERA", "PIE", "TID", "S", "FA",
+    "FURB", "PGH", "BLE", "FLY", "RSE", "COM",
+    "ISC", "ASYNC", "LOG", "ARG",
+    "TD", "PLW", "EM",
+    "PLR", "C90"
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*" = ["S101", "PLR2004"]

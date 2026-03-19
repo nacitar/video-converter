@@ -10,17 +10,20 @@ def main() -> int:
     project_root_dir = this_script.parent
     scripts = [this_script.name]
     commands = [
-        (["black", "."] + scripts, "formatting code"),
-        (["isort", "."] + scripts, "sorting imports"),
-        (["mypy", "--scripts-are-modules"] + scripts, "typechecking scripts"),
+        (["black", ".", *scripts], "formatting code"),
+        (
+            ["ruff", "check", "--fix", "--select", "I", ".", *scripts],
+            "sorting imports",
+        ),
+        (["mypy", "--scripts-are-modules", *scripts], "typechecking scripts"),
         (["mypy", "."], "typechecking package"),
-        (["flake8", "."] + scripts, "linting"),
+        (["ruff", "check", ".", *scripts], "linting"),
         (["pytest"], "executing tests"),
     ]
     for command, description in commands:
         print(f"Running {command[0]}... ({description})")
         try:
-            run(command, check=True, cwd=project_root_dir)
+            run(command, check=True, cwd=project_root_dir)  # noqa: S603
         except CalledProcessError as e:
             return e.returncode
         print()
