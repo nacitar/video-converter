@@ -278,29 +278,38 @@ class TrackMetadata:
         # Lossless tier
         if name.startswith("pcm_"):
             # Companded PCM is lower quality than linear PCM
-            if name in {"pcm_mulaw", "pcm_alaw"}:
-                return 60
-            return 90
-        if name in {"truehd", "mlp", "flac", "alac", "wavpack", "ape", "tta"}:
-            return 95
+            score = 60 if name in {"pcm_mulaw", "pcm_alaw"} else 90
+        elif name in {
+            "truehd",
+            "mlp",
+            "flac",
+            "alac",
+            "wavpack",
+            "ape",
+            "tta",
+        }:
+            score = 95
 
         # DTS family (profile distinguishes lossless DTS-HD MA)
-        if name == "dts":
+        elif name == "dts":
             if "dts-hd ma" in profile:
-                return 94  # lossless
-            if "dts-hd" in profile:  # HRA (lossy but higher quality)
-                return 55
-            return 45  # DTS core (lossy)
+                score = 94  # lossless
+            elif "dts-hd" in profile:  # HRA (lossy but higher quality)
+                score = 55
+            else:
+                score = 45  # DTS core (lossy)
 
         # High-quality lossy tier
-        if name in {"opus", "eac3", "aac"}:
-            return 50
+        elif name in {"opus", "eac3", "aac"}:
+            score = 50
 
         # Mid/legacy lossy tier
-        if name in {"ac3", "vorbis", "mp3"}:
-            return 40
+        elif name in {"ac3", "vorbis", "mp3"}:
+            score = 40
+        else:
+            score = 10
 
-        return 10
+        return score
 
     def __str__(self) -> str:
         indicator: list[str] = [str(self.index), self.identifier]
@@ -532,79 +541,94 @@ class MediaInfo:
 
 
 @dataclass
-class EncoderSettings:
+class AudioSettings:
     channels: int | None = None
     copy_only: bool = False
 
 
-def get_encoder_cli(
-    source: Path,
-    output: Path,
-    *,
-    append_label: bool = False,
-    extra_av_indexes: list[int] | None = None,
-    crf: int = 22,
-    preset: str = "slow",
-    copy_video: bool = False,
-    no_video: bool = False,
-    audio_languages: list[str] | None = None,
-    copy_audio: bool = False,
-    no_audio: bool = False,
-    no_subtitles: bool = False,
-    no_chapters: bool = False,
-) -> tuple[list[TrackMetadata], list[str | Path]]:
-    if extra_av_indexes is None:
-        extra_av_indexes = []
-    if audio_languages is None:
-        audio_languages = []
+@dataclass
+class EncoderCliOptions:
+    append_label: bool
+    extra_av_indexes: list[int]
+    crf: int
+    preset: str
+    copy_video: bool
+    no_video: bool
+    audio_languages: list[str]
+    copy_audio: bool
+    no_audio: bool
+    no_subtitles: bool
+    no_chapters: bool
 
-    info = MediaInfo.from_path(source)
-    source_file_index = 0  # NOTE: assumes only one source file!
-    tracker = IdentifierTracker()
-    arguments = dict_to_args(
-        {
-            "-i": str(source),
-            "-map_metadata:g": "-1",
-            "-map_metadata:s": "-1",
-            "-map_metadata:p": "-1",
-        }
-    )
-    title_arguments: dict[str, str] = {}
 
-    track_arguments: dict[str, str]
-    track: TrackMetadata | None
+class EncoderCliBuilder:
+    def __init__(
+        self, source: Path, output: Path, options: EncoderCliOptions
+    ) -> None:
+        self.source = source
+        self.output = output
+        self.append_label = options.append_label
+        self.extra_av_indexes = list(options.extra_av_indexes or [])
+        self.crf = options.crf
+        self.preset = options.preset
+        self.copy_video = options.copy_video
+        self.no_video = options.no_video
+        self.audio_languages = list(options.audio_languages or [])
+        self.copy_audio = options.copy_audio
+        self.no_audio = options.no_audio
+        self.no_subtitles = options.no_subtitles
+        self.no_chapters = options.no_chapters
 
-    extra_video_tracks: list[TrackMetadata] = []
-    extra_audio_tracks: list[TrackMetadata] = []
+        self.info = MediaInfo.from_path(self.source)
+        self.source_file_index = 0  # NOTE: assumes only one source file!
+        self.tracker = IdentifierTracker()
+        self.arguments = dict_to_args(
+            {
+                "-i": str(self.source),
+                "-map_metadata:g": "-1",
+                "-map_metadata:s": "-1",
+                "-map_metadata:p": "-1",
+            }
+        )
+        self.title_arguments: dict[str, str] = {}
+        self.extra_video_tracks: list[TrackMetadata] = []
+        self.extra_audio_tracks: list[TrackMetadata] = []
+        self.tracks_in_output: list[TrackMetadata] = []
 
-    tracks_in_output: list[TrackMetadata] = []
-    for index in extra_av_indexes:
-        track = info.track_from_index(index)
-        if track.is_video():
-            extra_video_tracks.append(track)
-        elif track.is_audio():
-            extra_audio_tracks.append(track)
-        else:
-            msg = f"Extra track {index} is neither audio or video."
-            raise ValueError(msg)
+        self._collect_extra_tracks()
 
-    def map_track(track: TrackMetadata) -> str:  # closure
-        track_id = tracker.next(track.codec_type)
-        arguments.extend(["-map", f"{source_file_index}:{track.identifier}"])
+    def _collect_extra_tracks(self) -> None:
+        for index in self.extra_av_indexes:
+            track = self.info.track_from_index(index)
+            if track.is_video():
+                self.extra_video_tracks.append(track)
+            elif track.is_audio():
+                self.extra_audio_tracks.append(track)
+            else:
+                msg = f"Extra track {index} is neither audio or video."
+                raise ValueError(msg)
+
+    def _map_track(self, track: TrackMetadata) -> str:
+        track_id = self.tracker.next(track.codec_type)
+        self.arguments.extend(
+            ["-map", f"{self.source_file_index}:{track.identifier}"]
+        )
         if track.title:
-            title_arguments[f"-metadata:s:{track_id}"] = f"title={track.title}"
+            self.title_arguments[f"-metadata:s:{track_id}"] = (
+                f"title={track.title}"
+            )
         if track.language:
-            arguments.extend(
+            self.arguments.extend(
                 [f"-metadata:s:{track_id}", f"language={track.language}"]
             )
         return track_id
 
-    if not no_video:
-        best_video = info.best_video()
+    def _add_video(self) -> None:
+        best_video = self.info.best_video()
         if best_video is None:
             msg = "No video tracks found!"
             raise RuntimeError(msg)
-        if append_label:
+        if self.append_label:
             label = " ".join(
                 [
                     label
@@ -617,30 +641,32 @@ def get_encoder_cli(
             )
             if label:
                 label = f" [{label}]"
-            output = output.parent / (output.stem + label + output.suffix)
+            self.output = self.output.parent / (
+                self.output.stem + label + self.output.suffix
+            )
         video_output_tracks: list[TrackMetadata] = [best_video]
         video_output_tracks.extend(
             track
-            for track in extra_video_tracks
+            for track in self.extra_video_tracks
             if track not in video_output_tracks
         )
         first_video_track = True
         for track in video_output_tracks:
-            tracks_in_output.append(track)
-            track_id = map_track(track)
+            self.tracks_in_output.append(track)
+            track_id = self._map_track(track)
 
             track_arguments = {
                 "-disposition": "default" if first_video_track else "0"
             }
             first_video_track = False
-            if copy_video:
+            if self.copy_video:
                 track_arguments["-codec"] = "copy"
             else:
                 track_arguments.update(
                     {
                         "-codec": "libx265",  # HEVC
-                        "-crf": str(crf),
-                        "-preset": preset,
+                        "-crf": str(self.crf),
+                        "-preset": self.preset,
                     }
                 )
                 if track.is_hdr():
@@ -674,134 +700,167 @@ def get_encoder_cli(
                             "-color_trc": "bt709",
                         }
                     )
-            arguments.extend(
+            self.arguments.extend(
                 dict_to_args(track_arguments, key_suffix=f":{track_id}")
             )
 
-    if not no_audio:
+    def _add_audio(self) -> None:
         first_audio_track = True
         channels_5_1 = 6
-        for language in audio_languages:
-            any_audio_this_language = False
-            audio_best_atmos = info.best_audio(
-                [AudioFilter(atmos=True, language=language)]
+        for language in self.audio_languages:
+            audio_output_tracks = self._audio_output_tracks_for_language(
+                language, channels_5_1
             )
-            audio_best_non_atmos = info.best_audio(
-                [AudioFilter(atmos=False, language=language)]
-            )
-            if (
-                audio_best_non_atmos is not None
-                and audio_best_non_atmos.channels <= channels_5_1
-            ):
-                audio_best_non_atmos = None  # not better, already covered
-
-            audio_5_1 = info.best_audio(
-                [
-                    AudioFilter(
-                        atmos=False,
-                        channel_min=channels_5_1,
-                        channel_max=channels_5_1,
-                        language=language,
-                    ),
-                    AudioFilter(
-                        atmos=False,
-                        channel_min=channels_5_1,
-                        language=language,
-                    ),
-                    AudioFilter(
-                        atmos=True,
-                        channel_min=channels_5_1,
-                        channel_max=channels_5_1,
-                        language=language,
-                    ),
-                    AudioFilter(
-                        atmos=True, channel_min=channels_5_1, language=language
-                    ),
-                ]
-            )
-            if audio_5_1 is None:
-                logger.warning(
-                    "no 5.1+ audio source found; audio won't be 5.1!"
+            first_audio_track, any_audio_this_language = (
+                self._append_audio_tracks(
+                    audio_output_tracks, first_audio_track, channels_5_1
                 )
-                audio_fallback = (
-                    info.best_audio([AudioFilter(atmos=False)])
-                    or audio_best_atmos
-                )
-            else:
-                if audio_5_1.is_atmos():
-                    logger.warning(
-                        "5.1 audio to be generated from Atmos source."
-                    )
-                audio_fallback = None  # not needed; we have 5.1
-
-            audio_output_tracks = [
-                (
-                    EncoderSettings(
-                        copy_only=copy_audio, channels=channels_5_1
-                    ),
-                    audio_5_1,
-                ),
-                (EncoderSettings(copy_only=copy_audio), audio_best_non_atmos),
-                (EncoderSettings(copy_only=True), audio_best_atmos),
-                (EncoderSettings(copy_only=copy_audio), audio_fallback),
-            ]
-            audio_output_tracks.extend(
-                (EncoderSettings(copy_only=copy_audio), track)
-                for track in extra_audio_tracks
-                if track not in [entry[1] for entry in audio_output_tracks]
             )
-
-            for settings, track in audio_output_tracks:
-                if track is None:
-                    continue
-                tracks_in_output.append(track)
-                track_id = map_track(track)
-                track_arguments = {
-                    "-disposition": "default" if first_audio_track else "0"
-                }
-                first_audio_track = False
-                any_audio_this_language = True
-                if settings.copy_only:
-                    track_arguments["-codec"] = "copy"
-                else:
-                    if (
-                        settings.channels is not None
-                        and settings.channels != track.channels
-                    ):
-                        channels = settings.channels
-                    else:
-                        channels = track.channels
-                    if channels > channels_5_1:
-                        track_arguments.update(
-                            {
-                                "-codec": "libopus",
-                                "-ac": str(channels),
-                                "-b": f"{channels * 80}k",
-                            }
-                        )
-                    else:
-                        track_arguments.update(
-                            {
-                                "-codec": "eac3",
-                                "-ac": str(channels),
-                                "-b": f"{channels * 112}k",
-                            }
-                        )
-                arguments.extend(
-                    dict_to_args(track_arguments, key_suffix=f":{track_id}")
-                )
             if not any_audio_this_language:
                 logger.warning(f"No audio selected for language: {language}")
         if first_audio_track:
             msg = "No audio tracks included!"
             raise RuntimeError(msg)
-    if not no_subtitles:
+
+    def _audio_output_tracks_for_language(
+        self, language: str, channels_5_1: int
+    ) -> list[tuple[AudioSettings, TrackMetadata | None]]:
+        audio_5_1, audio_best_non_atmos, audio_best_atmos, audio_fallback = (
+            self._select_audio_sources(language, channels_5_1)
+        )
+        audio_output_tracks = [
+            (
+                AudioSettings(
+                    copy_only=self.copy_audio, channels=channels_5_1
+                ),
+                audio_5_1,
+            ),
+            (AudioSettings(copy_only=self.copy_audio), audio_best_non_atmos),
+            (AudioSettings(copy_only=True), audio_best_atmos),
+            (AudioSettings(copy_only=self.copy_audio), audio_fallback),
+        ]
+        audio_output_tracks.extend(
+            (AudioSettings(copy_only=self.copy_audio), track)
+            for track in self.extra_audio_tracks
+            if track not in [entry[1] for entry in audio_output_tracks]
+        )
+        return audio_output_tracks
+
+    def _select_audio_sources(
+        self, language: str, channels_5_1: int
+    ) -> tuple[
+        TrackMetadata | None,
+        TrackMetadata | None,
+        TrackMetadata | None,
+        TrackMetadata | None,
+    ]:
+        audio_best_atmos = self.info.best_audio(
+            [AudioFilter(atmos=True, language=language)]
+        )
+        audio_best_non_atmos = self.info.best_audio(
+            [AudioFilter(atmos=False, language=language)]
+        )
+        if (
+            audio_best_non_atmos is not None
+            and audio_best_non_atmos.channels <= channels_5_1
+        ):
+            audio_best_non_atmos = None  # not better, already covered
+
+        audio_5_1 = self.info.best_audio(
+            [
+                AudioFilter(
+                    atmos=False,
+                    channel_min=channels_5_1,
+                    channel_max=channels_5_1,
+                    language=language,
+                ),
+                AudioFilter(
+                    atmos=False, channel_min=channels_5_1, language=language
+                ),
+                AudioFilter(
+                    atmos=True,
+                    channel_min=channels_5_1,
+                    channel_max=channels_5_1,
+                    language=language,
+                ),
+                AudioFilter(
+                    atmos=True, channel_min=channels_5_1, language=language
+                ),
+            ]
+        )
+        if audio_5_1 is None:
+            logger.warning("no 5.1+ audio source found; audio won't be 5.1!")
+            audio_fallback = (
+                self.info.best_audio([AudioFilter(atmos=False)])
+                or audio_best_atmos
+            )
+        else:
+            if audio_5_1.is_atmos():
+                logger.warning("5.1 audio to be generated from Atmos source.")
+            audio_fallback = None  # not needed; we have 5.1
+
+        return (
+            audio_5_1,
+            audio_best_non_atmos,
+            audio_best_atmos,
+            audio_fallback,
+        )
+
+    def _append_audio_tracks(
+        self,
+        audio_output_tracks: list[tuple[AudioSettings, TrackMetadata | None]],
+        first_audio_track: bool,
+        channels_5_1: int,
+    ) -> tuple[bool, bool]:
+        any_audio_this_language = False
+        for settings, track in audio_output_tracks:
+            if track is None:
+                continue
+            self.tracks_in_output.append(track)
+            track_id = self._map_track(track)
+            track_arguments = {
+                "-disposition": "default" if first_audio_track else "0"
+            }
+            first_audio_track = False
+            any_audio_this_language = True
+            if settings.copy_only:
+                track_arguments["-codec"] = "copy"
+            else:
+                if (
+                    settings.channels is not None
+                    and settings.channels != track.channels
+                ):
+                    channels = settings.channels
+                else:
+                    channels = track.channels
+                if channels > channels_5_1:
+                    track_arguments.update(
+                        {
+                            "-codec": "libopus",
+                            "-ac": str(channels),
+                            "-b": f"{channels * 80}k",
+                        }
+                    )
+                else:
+                    track_arguments.update(
+                        {
+                            "-codec": "eac3",
+                            "-ac": str(channels),
+                            "-b": f"{channels * 112}k",
+                        }
+                    )
+            self.arguments.extend(
+                dict_to_args(track_arguments, key_suffix=f":{track_id}")
+            )
+        return first_audio_track, any_audio_this_language
+
+    def _add_subtitles(self) -> None:
         first_english_subtitle_track = True
         for track in sorted(
-            info.subtitle_tracks, key=MediaInfo.subtitle_language_sort_key
+            self.info.subtitle_tracks, key=MediaInfo.subtitle_language_sort_key
         ):
-            tracks_in_output.append(track)
-            track_id = map_track(track)
+            self.tracks_in_output.append(track)
+            track_id = self._map_track(track)
             track_arguments = {}
             if track.codec_name.casefold() == "mov_text":
                 track_arguments["-codec"] = "srt"  # convert!
@@ -815,27 +874,43 @@ def get_encoder_cli(
                 first_english_subtitle_track = False
             else:
                 track_arguments["-disposition"] = "0"
-            arguments.extend(
+            self.arguments.extend(
                 dict_to_args(track_arguments, key_suffix=f":{track_id}")
             )
 
-    if not no_chapters:
-        arguments.extend(
-            dict_to_args({"-map_chapters": str(source_file_index)})
+    def _add_chapters(self) -> None:
+        self.arguments.extend(
+            dict_to_args({"-map_chapters": str(self.source_file_index)})
         )
-    arguments.extend(dict_to_args(title_arguments))
 
-    return (
-        tracks_in_output,
-        [
-            cli_tool("ffmpeg"),
-            "-stats",
-            "-loglevel",
-            "error",
-            *arguments,
-            output,
-        ],
-    )
+    def build(self) -> tuple[list[TrackMetadata], list[str | Path]]:
+        if not self.no_video:
+            self._add_video()
+        if not self.no_audio:
+            self._add_audio()
+        if not self.no_subtitles:
+            self._add_subtitles()
+        if not self.no_chapters:
+            self._add_chapters()
+        self.arguments.extend(dict_to_args(self.title_arguments))
+
+        return (
+            self.tracks_in_output,
+            [
+                cli_tool("ffmpeg"),
+                "-stats",
+                "-loglevel",
+                "error",
+                *self.arguments,
+                self.output,
+            ],
+        )
+
+
+def get_encoder_cli(
+    source: Path, output: Path, options: EncoderCliOptions
+) -> tuple[list[TrackMetadata], list[str | Path]]:
+    return EncoderCliBuilder(source, output, options).build()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -957,17 +1032,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         tracks_in_output, encoder_cli = get_encoder_cli(
             args.source,
             args.output,
-            append_label=args.append_label,
-            extra_av_indexes=args.extra_av,
-            crf=args.crf,
-            preset=args.preset,
-            copy_video=args.copy_video,
-            no_video=args.no_video,
-            audio_languages=args.audio_language,
-            copy_audio=args.copy_audio,
-            no_audio=args.no_audio,
-            no_subtitles=args.no_subtitles,
-            no_chapters=args.no_chapters,
+            EncoderCliOptions(
+                append_label=args.append_label,
+                extra_av_indexes=args.extra_av,
+                crf=args.crf,
+                preset=args.preset,
+                copy_video=args.copy_video,
+                no_video=args.no_video,
+                audio_languages=args.audio_language,
+                copy_audio=args.copy_audio,
+                no_audio=args.no_audio,
+                no_subtitles=args.no_subtitles,
+                no_chapters=args.no_chapters,
+            ),
         )
         print(f"Processing: {args.source}")
         for track in tracks_in_output:
