@@ -389,7 +389,7 @@ class MediaInfo:
             str(path),
         ]
         log_cli(arguments)
-        data = json.loads(subprocess.check_output(arguments))
+        data = json.loads(subprocess.check_output(arguments))  # noqa: S603
 
         tracker = IdentifierTracker()
 
