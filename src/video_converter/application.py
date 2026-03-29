@@ -474,7 +474,7 @@ class MediaInfo:
     @classmethod
     def subtitle_language_sort_key(
         cls, track: TrackMetadata
-    ) -> tuple[int, int, str, int]:
+    ) -> tuple[int, int, str, int, int]:
         language = (track.language or "").casefold()
         title = (track.title or "").casefold()
         codec_name = (track.codec_name or "").casefold()
@@ -625,7 +625,15 @@ class EncoderCliBuilder:
             lower_title = track.title.casefold()
             if any(
                 text in lower_title
-                for text in ("7.1", "5.1", "stereo", "mono", "atmos", "truehd")
+                for text in (
+                    "7.1",
+                    "5.1",
+                    "stereo",
+                    "mono",
+                    "atmos",
+                    "truehd",
+                    "dts-hd",
+                )
             ):
                 logger.warning(
                     f"Stripping title from track #{track_id}: {track.title}"
