@@ -477,11 +477,13 @@ class MediaInfo:
     ) -> tuple[int, int, str, int]:
         language = (track.language or "").casefold()
         title = (track.title or "").casefold()
+        codec_name = (track.codec_name or "").casefold()
         return (
             0 if language == "eng" else 1,
             0 if title == "" else 1,
             title,
-            0 if track.codec_name.casefold() == "subrip" else 1,
+            0 if codec_name == "subrip" else 1,
+            0 if codec_name == "mov_text" else 1,
         )
 
     @cached_property
