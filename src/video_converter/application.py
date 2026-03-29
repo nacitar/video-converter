@@ -671,6 +671,16 @@ class EncoderCliBuilder:
                     }
                 )
                 if track.is_hdr():
+                    if track.is_hdr10plus():
+                        logger.warning(
+                            "HDR10+ data will be removed from"
+                            f" track #{track_id}"
+                        )
+                    if track.is_dolby_vision():
+                        logger.warning(
+                            "Dolby Vision data will be removed from"
+                            f" track #{track_id}"
+                        )
                     x265_params = [
                         "repeat-headers=1",
                         (
