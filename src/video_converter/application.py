@@ -555,24 +555,21 @@ class EncoderCliOptions:
     no_chapters: bool
 
 
+@dataclass
 class EncoderCliBuilder:
-    def __init__(
-        self, source: Path, output: Path, options: EncoderCliOptions
-    ) -> None:
-        self.source = source
-        self.output = output
-        self.append_label = options.append_label
-        self.extra_av_indexes = list(options.extra_av_indexes or [])
-        self.crf = options.crf
-        self.preset = options.preset
-        self.copy_video = options.copy_video
-        self.no_video = options.no_video
-        self.audio_languages = list(options.audio_languages or [])
-        self.copy_audio = options.copy_audio
-        self.no_audio = options.no_audio
-        self.no_subtitles = options.no_subtitles
-        self.no_chapters = options.no_chapters
+    source: Path
+    output: Path
+    options: EncoderCliOptions
+    info: MediaInfo = field(init=False)
+    source_file_index: int = field(init=False)
+    tracker: IdentifierTracker = field(init=False)
+    track_arguments: list[str | Path] = field(init=False)
+    title_arguments: dict[str, str] = field(init=False)
+    extra_video_tracks: list[TrackMetadata] = field(init=False)
+    extra_audio_tracks: list[TrackMetadata] = field(init=False)
+    tracks_in_output: list[TrackMetadata] = field(init=False)
 
+    def __post_init__(self) -> None:
         self.info = MediaInfo.from_path(self.source)
         self.source_file_index = 0  # NOTE: assumes only one source file!
         self.tracker = IdentifierTracker()
@@ -584,25 +581,25 @@ class EncoderCliBuilder:
                 "-map_metadata:p": "-1",
             }
         )
-        self.title_arguments: dict[str, str] = {}
-        self.extra_video_tracks: list[TrackMetadata] = []
-        self.extra_audio_tracks: list[TrackMetadata] = []
-        self.tracks_in_output: list[TrackMetadata] = []
+        self.title_arguments = {}
+        self.extra_video_tracks = []
+        self.extra_audio_tracks = []
+        self.tracks_in_output = []
 
         self.__collect_extra_tracks()
 
-        if not self.no_video:
+        if not self.options.no_video:
             self.__add_video()
-        if not self.no_audio:
+        if not self.options.no_audio:
             self.__add_audio()
-        if not self.no_subtitles:
+        if not self.options.no_subtitles:
             self.__add_subtitles()
-        if not self.no_chapters:
+        if not self.options.no_chapters:
             self.__add_chapters()
         self.track_arguments.extend(dict_to_args(self.title_arguments))
 
     def __collect_extra_tracks(self) -> None:
-        for index in self.extra_av_indexes:
+        for index in self.options.extra_av_indexes or []:
             track = self.info.track_from_index(index)
             if track.is_video():
                 self.extra_video_tracks.append(track)
@@ -632,7 +629,7 @@ class EncoderCliBuilder:
         if best_video is None:
             msg = "No video tracks found!"
             raise RuntimeError(msg)
-        if self.append_label:
+        if self.options.append_label:
             label = " ".join(
                 [
                     label
@@ -663,14 +660,14 @@ class EncoderCliBuilder:
                 "-disposition": "default" if first_video_track else "0"
             }
             first_video_track = False
-            if self.copy_video:
+            if self.options.copy_video:
                 track_arguments["-codec"] = "copy"
             else:
                 track_arguments.update(
                     {
                         "-codec": "libx265",  # HEVC
-                        "-crf": str(self.crf),
-                        "-preset": self.preset,
+                        "-crf": str(self.options.crf),
+                        "-preset": self.options.preset,
                     }
                 )
                 if track.is_hdr():
@@ -711,7 +708,7 @@ class EncoderCliBuilder:
     def __add_audio(self) -> None:
         has_audio = False
         channels_5_1 = 6
-        for language in self.audio_languages:
+        for language in self.options.audio_languages or []:
             audio_output_tracks = [
                 self.info.best_audio(
                     [AudioFilter(channel_min=channels_5_1, language=language)]
@@ -727,42 +724,37 @@ class EncoderCliBuilder:
                 for track in self.extra_audio_tracks
                 if track not in audio_output_tracks
             )
+            first_audio_track = True
+            for track in audio_output_tracks:
+                if track is None:
+                    continue
+                self.tracks_in_output.append(track)
+                track_id = self.__map_track(track)
+                track_arguments = {
+                    "-disposition": "default" if first_audio_track else "0"
+                }
+                first_audio_track = False
+                if self.options.copy_audio:
+                    track_arguments["-codec"] = "copy"
+                else:
+                    if track.is_atmos():
+                        logger.warning(
+                            f"Atmos data will be removed from track #{track_id}"
+                        )
+                    track_arguments.update(
+                        {
+                            "-codec": "libopus",
+                            "-ac": str(track.channels),
+                            "-b": f"{track.channels * 80}k",
+                        }
+                    )
+                self.track_arguments.extend(
+                    dict_to_args(track_arguments, key_suffix=f":{track_id}")
+                )
 
-            self.__append_audio_tracks(audio_output_tracks)
         if not has_audio:
             msg = "No audio tracks included!"
             raise RuntimeError(msg)
-
-    def __append_audio_tracks(
-        self, audio_output_tracks: list[TrackMetadata | None]
-    ) -> None:
-        first_audio_track = True
-        for track in audio_output_tracks:
-            if track is None:
-                continue
-            self.tracks_in_output.append(track)
-            track_id = self.__map_track(track)
-            track_arguments = {
-                "-disposition": "default" if first_audio_track else "0"
-            }
-            first_audio_track = False
-            if self.copy_audio:
-                track_arguments["-codec"] = "copy"
-            else:
-                if track.is_atmos():
-                    logger.warning(
-                        f"Atmos data will be removed from track #{track_id}"
-                    )
-                track_arguments.update(
-                    {
-                        "-codec": "libopus",
-                        "-ac": str(track.channels),
-                        "-b": f"{track.channels * 80}k",
-                    }
-                )
-            self.track_arguments.extend(
-                dict_to_args(track_arguments, key_suffix=f":{track_id}")
-            )
 
     def __add_subtitles(self) -> None:
         first_english_subtitle_track = True
