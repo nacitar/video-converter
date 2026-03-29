@@ -615,9 +615,18 @@ class EncoderCliBuilder:
             ["-map", f"{self.source_file_index}:{track.identifier}"]
         )
         if track.title:
-            self.title_arguments[f"-metadata:s:{track_id}"] = (
-                f"title={track.title}"
-            )
+            lower_title = track.title.casefold()
+            if any(
+                text in lower_title
+                for text in ("7.1", "5.1", "stereo", "mono", "atmos")
+            ):
+                logger.warning(
+                    f"Stripping title from track #{track_id}: {track.title}"
+                )
+                title = ""
+            else:
+                title = track.title
+            self.title_arguments[f"-metadata:s:{track_id}"] = f"title={title}"
         if track.language:
             self.track_arguments.extend(
                 [f"-metadata:s:{track_id}", f"language={track.language}"]
