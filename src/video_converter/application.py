@@ -472,13 +472,12 @@ class MediaInfo:
         return tuple([track for track in self.tracks if track.is_subtitle()])
 
     @classmethod
-    def subtitle_language_sort_key(cls, track: TrackMetadata) -> int:
+    def subtitle_language_sort_key(
+        cls, track: TrackMetadata
+    ) -> tuple[int, int, str]:
         language = (track.language or "").casefold()
-        if language == "eng":
-            return 0
-        if language == "":
-            return 1
-        return 3
+        title = (track.title or "").casefold()
+        return (0 if language == "eng" else 1, 0 if title == "" else 1, title)
 
     @cached_property
     def other_tracks(self) -> tuple[TrackMetadata, ...]:
