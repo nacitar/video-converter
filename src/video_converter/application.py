@@ -618,7 +618,7 @@ class EncoderCliBuilder:
             lower_title = track.title.casefold()
             if any(
                 text in lower_title
-                for text in ("7.1", "5.1", "stereo", "mono", "atmos")
+                for text in ("7.1", "5.1", "stereo", "mono", "atmos", "truehd")
             ):
                 logger.warning(
                     f"Stripping title from track #{track_id}: {track.title}"
