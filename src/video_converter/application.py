@@ -590,19 +590,19 @@ class EncoderCliBuilder:
         self.extra_audio_tracks: list[TrackMetadata] = []
         self.tracks_in_output: list[TrackMetadata] = []
 
-        self._collect_extra_tracks()
+        self.__collect_extra_tracks()
 
         if not self.no_video:
-            self._add_video()
+            self.__add_video()
         if not self.no_audio:
-            self._add_audio()
+            self.__add_audio()
         if not self.no_subtitles:
-            self._add_subtitles()
+            self.__add_subtitles()
         if not self.no_chapters:
-            self._add_chapters()
+            self.__add_chapters()
         self.track_arguments.extend(dict_to_args(self.title_arguments))
 
-    def _collect_extra_tracks(self) -> None:
+    def __collect_extra_tracks(self) -> None:
         for index in self.extra_av_indexes:
             track = self.info.track_from_index(index)
             if track.is_video():
@@ -613,7 +613,7 @@ class EncoderCliBuilder:
                 msg = f"Extra track {index} is neither audio or video."
                 raise ValueError(msg)
 
-    def _map_track(self, track: TrackMetadata) -> str:
+    def __map_track(self, track: TrackMetadata) -> str:
         track_id = self.tracker.next(track.codec_type)
         self.track_arguments.extend(
             ["-map", f"{self.source_file_index}:{track.identifier}"]
@@ -628,7 +628,7 @@ class EncoderCliBuilder:
             )
         return track_id
 
-    def _add_video(self) -> None:
+    def __add_video(self) -> None:
         best_video = self.info.best_video()
         if best_video is None:
             msg = "No video tracks found!"
@@ -658,7 +658,7 @@ class EncoderCliBuilder:
         first_video_track = True
         for track in video_output_tracks:
             self.tracks_in_output.append(track)
-            track_id = self._map_track(track)
+            track_id = self.__map_track(track)
 
             track_arguments = {
                 "-disposition": "default" if first_video_track else "0"
@@ -709,7 +709,7 @@ class EncoderCliBuilder:
                 dict_to_args(track_arguments, key_suffix=f":{track_id}")
             )
 
-    def _add_audio(self) -> None:
+    def __add_audio(self) -> None:
         has_audio = False
         channels_5_1 = 6
         for language in self.audio_languages:
@@ -729,12 +729,12 @@ class EncoderCliBuilder:
                 if track not in audio_output_tracks
             )
 
-            self._append_audio_tracks(audio_output_tracks)
+            self.__append_audio_tracks(audio_output_tracks)
         if not has_audio:
             msg = "No audio tracks included!"
             raise RuntimeError(msg)
 
-    def _append_audio_tracks(
+    def __append_audio_tracks(
         self, audio_output_tracks: list[TrackMetadata | None]
     ) -> None:
         first_audio_track = True
@@ -742,7 +742,7 @@ class EncoderCliBuilder:
             if track is None:
                 continue
             self.tracks_in_output.append(track)
-            track_id = self._map_track(track)
+            track_id = self.__map_track(track)
             track_arguments = {
                 "-disposition": "default" if first_audio_track else "0"
             }
@@ -765,13 +765,13 @@ class EncoderCliBuilder:
                 dict_to_args(track_arguments, key_suffix=f":{track_id}")
             )
 
-    def _add_subtitles(self) -> None:
+    def __add_subtitles(self) -> None:
         first_english_subtitle_track = True
         for track in sorted(
             self.info.subtitle_tracks, key=MediaInfo.subtitle_language_sort_key
         ):
             self.tracks_in_output.append(track)
-            track_id = self._map_track(track)
+            track_id = self.__map_track(track)
             track_arguments = {}
             if track.codec_name.casefold() == "mov_text":
                 track_arguments["-codec"] = "srt"  # convert!
@@ -789,7 +789,7 @@ class EncoderCliBuilder:
                 dict_to_args(track_arguments, key_suffix=f":{track_id}")
             )
 
-    def _add_chapters(self) -> None:
+    def __add_chapters(self) -> None:
         self.track_arguments.extend(
             dict_to_args({"-map_chapters": str(self.source_file_index)})
         )
