@@ -474,15 +474,31 @@ class MediaInfo:
     @classmethod
     def subtitle_language_sort_key(
         cls, track: TrackMetadata
-    ) -> tuple[int, int, str, int, int]:
+    ) -> tuple[Any, ...]:
         language = (track.language or "").casefold()
         title = (track.title or "").casefold()
         codec_name = (track.codec_name or "").casefold()
+
         return (
+            # english first
             0 if language == "eng" else 1,
-            0 if title == "" else 1,
+            # spanish second
+            0 if language == "spa" else 1,
+            # sort by language
+            language,
+            (
+                # prefer non-commentary
+                0 if "commentary" not in title else 1,
+                # prefer blank or obviously bare titles
+                0 if title in ("", "english", "eng") else 1,
+                # prefer non-sdh
+                0 if "sdh" not in title else 1,
+            ),
+            # sort by title
             title,
+            # prefer subrip
             0 if codec_name == "subrip" else 1,
+            # prefer mov_text (converts to subrip)
             0 if codec_name == "mov_text" else 1,
         )
 
@@ -742,7 +758,8 @@ class EncoderCliBuilder:
     def __add_audio(self) -> None:
         has_audio = False
         channels_5_1 = 6
-        for language in self.options.audio_languages or []:
+        for language_raw in self.options.audio_languages or []:
+            language = language_raw.casefold()
             audio_output_tracks = [
                 self.info.best_audio(
                     [AudioFilter(channel_min=channels_5_1, language=language)]
