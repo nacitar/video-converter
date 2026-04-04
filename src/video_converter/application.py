@@ -657,6 +657,12 @@ class EncoderCliBuilder:
                 title = ""
             else:
                 title = track.title
+            title = " ".join(
+                word
+                for word in title.split()
+                if word.casefold() not in ("ben.the.men", "btm")
+            )
+
             self.title_arguments[f"-metadata:s:{track_id}"] = f"title={title}"
         if track.language:
             self.track_arguments.extend(
