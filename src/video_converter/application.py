@@ -529,8 +529,9 @@ class MediaInfo:
                     self.audio_tracks_filtered(audio_filter),
                     key=lambda track: (
                         track.channels,
-                        track.title,
+                        not track.is_atmos(),
                         track.audio_codec_score(),
+                        track.title,
                     ),
                     reverse=True,
                 )[0]
