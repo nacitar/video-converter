@@ -5,6 +5,7 @@ import importlib.metadata
 import json
 import logging
 import subprocess
+import sys
 from dataclasses import KW_ONLY, asdict, dataclass, field
 from functools import cache, cached_property
 from itertools import chain
@@ -140,9 +141,15 @@ class TrackMetadata:
     channels: int
     color_transfer: str
     color_primaries: str
+    color_space: str
+    color_range: str
+    pix_fmt: str
+    bits_per_raw_sample: int
     width: int
     height: int
     side_data_list: tuple[SideData, ...]
+    attachment_mimetype: str
+    attachment_filename: str
 
     def is_visual_type(self) -> bool:
         return self.codec_type.casefold() == "video"
@@ -223,6 +230,31 @@ class TrackMetadata:
             and not self.is_audio()
             and not self.is_subtitle()
         )
+
+    def is_attachment(self) -> bool:
+        return self.codec_type.casefold() == "attachment"
+
+    def is_font_attachment(self) -> bool:
+        if not self.is_attachment():
+            return False
+        codec_name = self.codec_name.casefold()
+        mimetype = self.attachment_mimetype.casefold()
+        return codec_name in {"ttf", "otf", "woff", "woff2"} or any(
+            marker in mimetype
+            for marker in ("font", "truetype", "opentype", "woff")
+        )
+
+    def bit_depth(self) -> int:
+        if self.bits_per_raw_sample > 0:
+            return self.bits_per_raw_sample
+
+        pix_fmt = self.pix_fmt.casefold()
+        for bit_depth in (16, 14, 12, 10, 9, 8):
+            if f"p{bit_depth}" in pix_fmt:
+                return bit_depth
+        if self.is_video():
+            return 8
+        return 0
 
     def near_resolution(
         self, target_width: int, target_height: int, *, width_tol: float = 0.1
@@ -428,6 +460,12 @@ class MediaInfo:
                     channels=int(track.get("channels") or 0),
                     color_transfer=str(track.get("color_transfer") or ""),
                     color_primaries=str(track.get("color_primaries") or ""),
+                    color_space=str(track.get("color_space") or ""),
+                    color_range=str(track.get("color_range") or ""),
+                    pix_fmt=str(track.get("pix_fmt") or ""),
+                    bits_per_raw_sample=int(
+                        track.get("bits_per_raw_sample") or 0
+                    ),
                     width=int(track.get("width") or 0),
                     height=int(track.get("height") or 0),
                     side_data_list=tuple(
@@ -440,6 +478,8 @@ class MediaInfo:
                             for entry in (track.get("side_data_list") or [])
                         ]
                     ),
+                    attachment_mimetype=str(tags.get("mimetype") or ""),
+                    attachment_filename=str(tags.get("filename") or ""),
                 )
             )
         return MediaInfo(tracks=tuple(tracks))
@@ -505,6 +545,12 @@ class MediaInfo:
     @cached_property
     def other_tracks(self) -> tuple[TrackMetadata, ...]:
         return tuple([track for track in self.tracks if track.is_other()])
+
+    @cached_property
+    def font_attachment_tracks(self) -> tuple[TrackMetadata, ...]:
+        return tuple(
+            [track for track in self.tracks if track.is_font_attachment()]
+        )
 
     def best_video(self) -> TrackMetadata | None:
         # Choosing from HDR only if any are present, gets highest resolution
@@ -577,6 +623,7 @@ class EncoderCliOptions:
     no_audio: bool
     no_subtitles: bool
     no_chapters: bool
+    stream_policy: str
 
 
 @dataclass
@@ -591,6 +638,7 @@ class EncoderCliBuilder:
     title_arguments: dict[str, str] = field(init=False)
     extra_video_tracks: list[TrackMetadata] = field(init=False)
     extra_audio_tracks: list[TrackMetadata] = field(init=False)
+    audio_default_assigned: bool = field(init=False)
     tracks_in_output: list[TrackMetadata] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -608,6 +656,7 @@ class EncoderCliBuilder:
         self.title_arguments = {}
         self.extra_video_tracks = []
         self.extra_audio_tracks = []
+        self.audio_default_assigned = False
         self.tracks_in_output = []
 
         self.__collect_extra_tracks()
@@ -618,6 +667,7 @@ class EncoderCliBuilder:
             self.__add_audio()
         if not self.options.no_subtitles:
             self.__add_subtitles()
+            self.__add_font_attachments()
         if not self.options.no_chapters:
             self.__add_chapters()
         self.track_arguments.extend(dict_to_args(self.title_arguments))
@@ -676,6 +726,7 @@ class EncoderCliBuilder:
         if best_video is None:
             msg = "No video tracks found!"
             raise RuntimeError(msg)
+        video_output_tracks = self.__video_output_tracks(best_video)
         if self.options.append_label:
             label = " ".join(
                 [
@@ -692,127 +743,201 @@ class EncoderCliBuilder:
             self.output = self.output.parent / (
                 self.output.stem + label + self.output.suffix
             )
-        video_output_tracks: list[TrackMetadata] = [best_video]
-        video_output_tracks.extend(
-            track
-            for track in self.extra_video_tracks
-            if track not in video_output_tracks
-        )
         first_video_track = True
         for track in video_output_tracks:
             self.tracks_in_output.append(track)
             track_id = self.__map_track(track)
 
-            track_arguments = {
-                "-disposition": "default" if first_video_track else "0"
-            }
+            track_arguments = self.__video_track_arguments(
+                track, track_id, first_video_track=first_video_track
+            )
             first_video_track = False
-            if self.options.copy_video:
-                track_arguments["-codec"] = "copy"
-            else:
-                track_arguments.update(
-                    {
-                        "-codec": "libx265",  # HEVC
-                        "-crf": str(self.options.crf),
-                        "-preset": self.options.preset,
-                    }
-                )
-                if track.is_hdr():
-                    if track.is_hdr10plus():
-                        logger.warning(
-                            "HDR10+ data will be removed from"
-                            f" track #{track_id}"
-                        )
-                    if track.is_dolby_vision():
-                        logger.warning(
-                            "Dolby Vision data will be removed from"
-                            f" track #{track_id}"
-                        )
-                    x265_params = [
-                        "repeat-headers=1",
-                        (
-                            "master-display="
-                            "G(13250,34500)B(7500,3000)R(34000,16000)"
-                            "WP(15635,16450)L(10000000,1)"
-                        ),
-                    ]
-
-                    if cll := track.content_light_levels():
-                        x265_params.append(f"max-cll={cll}")
-
-                    track_arguments.update(
-                        {
-                            "-pix_fmt": "yuv420p10le",
-                            "-color_primaries": "bt2020",
-                            "-colorspace": "bt2020nc",
-                            "-color_trc": "smpte2084",
-                            "-x265-params": ":".join(x265_params),
-                        }
-                    )
-                else:
-                    track_arguments.update(
-                        {
-                            "-pix_fmt": "yuv420p",
-                            "-color_primaries": "bt709",
-                            "-colorspace": "bt709",
-                            "-color_trc": "bt709",
-                        }
-                    )
             self.track_arguments.extend(
                 dict_to_args(track_arguments, key_suffix=f":{track_id}")
             )
 
+    def __video_output_tracks(
+        self, best_video: TrackMetadata
+    ) -> list[TrackMetadata]:
+        video_output_tracks = [best_video]
+        if self.options.stream_policy == "all":
+            video_output_tracks.extend(
+                track
+                for track in self.info.video_tracks
+                if track not in video_output_tracks
+            )
+        else:
+            video_output_tracks.extend(
+                track
+                for track in self.extra_video_tracks
+                if track not in video_output_tracks
+            )
+        return video_output_tracks
+
+    def __video_track_arguments(
+        self, track: TrackMetadata, track_id: str, *, first_video_track: bool
+    ) -> dict[str, str]:
+        track_arguments = {
+            "-disposition": "default" if first_video_track else "0"
+        }
+        if self.options.copy_video:
+            track_arguments["-codec"] = "copy"
+            return track_arguments
+
+        track_arguments.update(
+            {
+                "-codec": "libx265",  # HEVC
+                "-crf": str(self.options.crf),
+                "-preset": self.options.preset,
+                "-pix_fmt": self.__target_video_pix_fmt(track),
+            }
+        )
+        if track.is_hdr10plus():
+            logger.warning(
+                f"HDR10+ data will be removed from track #{track_id}"
+            )
+        if track.is_dolby_vision():
+            logger.warning(
+                f"Dolby Vision data will be removed from track #{track_id}"
+            )
+
+        track_arguments.update(self.__video_color_arguments(track))
+        logger.debug(
+            "Video track color preservation"
+            f" #{track_id}:"
+            " input="
+            f"({track.pix_fmt or '-'},"
+            f" {track.color_range or '-'},"
+            f" {track.color_space or '-'},"
+            f" {track.color_transfer or '-'},"
+            f" {track.color_primaries or '-'})"
+            " output="
+            f"({track_arguments['-pix_fmt']},"
+            f" {track_arguments.get('-color_range', '-')},"
+            f" {track_arguments.get('-colorspace', '-')},"
+            f" {track_arguments.get('-color_trc', '-')},"
+            f" {track_arguments.get('-color_primaries', '-')})"
+        )
+        return track_arguments
+
+    def __target_video_pix_fmt(self, track: TrackMetadata) -> str:
+        main_10_bit_depth = 10
+        if track.bit_depth() >= main_10_bit_depth:
+            return "yuv420p10le"
+        return "yuv420p"
+
+    def __video_color_arguments(self, track: TrackMetadata) -> dict[str, str]:
+        track_arguments: dict[str, str] = {}
+        value_map = {
+            "-color_primaries": track.color_primaries,
+            "-colorspace": track.color_space,
+            "-color_trc": track.color_transfer,
+        }
+        for key, raw_value in value_map.items():
+            value = raw_value.casefold()
+            if value and value not in {"unknown", "reserved"}:
+                track_arguments[key] = value
+
+        if normalized_color_range := self.__normalize_color_range(
+            track.color_range
+        ):
+            track_arguments["-color_range"] = normalized_color_range
+
+        return track_arguments
+
+    def __normalize_color_range(self, raw_color_range: str) -> str:
+        color_range = raw_color_range.casefold()
+        if color_range in {"tv", "pc"}:
+            return color_range
+        if color_range == "mpeg":
+            return "tv"
+        if color_range == "jpeg":
+            return "pc"
+        return ""
+
     def __add_audio(self) -> None:
-        has_audio = False
         channels_5_1 = 6
-        for language_raw in self.options.audio_languages or []:
-            language = language_raw.casefold()
-            audio_output_tracks = [
-                self.info.best_audio(
+        if self.options.stream_policy == "all":
+            all_audio_output_tracks = self.__audio_tracks_all()
+            for track in all_audio_output_tracks:
+                self.__map_audio_track(track)
+        else:
+            audio_output_tracks: list[TrackMetadata] = []
+            for language_raw in self.options.audio_languages or []:
+                language = language_raw.casefold()
+                selected_track = self.info.best_audio(
                     [AudioFilter(channel_min=channels_5_1, language=language)]
                 )
-            ]
-            if audio_output_tracks:
-                has_audio = True
-            else:
-                logger.warning(f"No audio selected for language: {language}")
-
-            audio_output_tracks.extend(
-                track
-                for track in self.extra_audio_tracks
-                if track not in audio_output_tracks
-            )
-            first_audio_track = True
-            for track in audio_output_tracks:
-                if track is None:
-                    continue
-                self.tracks_in_output.append(track)
-                track_id = self.__map_track(track)
-                track_arguments = {
-                    "-disposition": "default" if first_audio_track else "0"
-                }
-                first_audio_track = False
-                if self.options.copy_audio:
-                    track_arguments["-codec"] = "copy"
-                else:
-                    if track.is_atmos():
-                        logger.warning(
-                            f"Atmos data will be removed from track #{track_id}"
-                        )
-                    track_arguments.update(
-                        {
-                            "-codec": "libopus",
-                            "-ac": str(track.channels),
-                            "-b": f"{track.channels * 80}k",
-                        }
+                if selected_track is None:
+                    logger.warning(
+                        f"No audio selected for language: {language}"
                     )
-                self.track_arguments.extend(
-                    dict_to_args(track_arguments, key_suffix=f":{track_id}")
+                elif selected_track not in audio_output_tracks:
+                    audio_output_tracks.append(selected_track)
+
+                audio_output_tracks.extend(
+                    extra_track
+                    for extra_track in self.extra_audio_tracks
+                    if extra_track not in audio_output_tracks
                 )
 
-        if not has_audio:
+            for index, track in enumerate(audio_output_tracks):
+                self.__map_audio_track(
+                    track,
+                    default=index == 0 and not self.audio_default_assigned,
+                )
+
+        if not self.audio_default_assigned:
             msg = "No audio tracks included!"
             raise RuntimeError(msg)
+
+    def __audio_tracks_all(self) -> list[TrackMetadata]:
+        language_priorities = {
+            language.casefold(): index
+            for index, language in enumerate(
+                self.options.audio_languages or []
+            )
+        }
+        return sorted(
+            self.info.audio_tracks,
+            key=lambda track: (
+                language_priorities.get(track.language.casefold(), 9999),
+                -track.channels,
+                not track.is_atmos(),
+                -track.audio_codec_score(),
+                track.index,
+            ),
+        )
+
+    def __map_audio_track(
+        self, track: TrackMetadata, *, default: bool | None = None
+    ) -> None:
+        self.tracks_in_output.append(track)
+        track_id = self.__map_track(track)
+        if default is None:
+            is_default = not self.audio_default_assigned
+        else:
+            is_default = default
+        if is_default:
+            self.audio_default_assigned = True
+        track_arguments = {"-disposition": "default" if is_default else "0"}
+        if self.options.copy_audio:
+            track_arguments["-codec"] = "copy"
+        else:
+            if track.is_atmos():
+                logger.warning(
+                    f"Atmos data will be removed from track #{track_id}"
+                )
+            track_arguments.update(
+                {
+                    "-codec": "libopus",
+                    "-ac": str(track.channels),
+                    "-b": f"{track.channels * 80}k",
+                }
+            )
+        self.track_arguments.extend(
+            dict_to_args(track_arguments, key_suffix=f":{track_id}")
+        )
 
     def __add_subtitles(self) -> None:
         first_english_subtitle_track = True
@@ -836,6 +961,14 @@ class EncoderCliBuilder:
                 track_arguments["-disposition"] = "0"
             self.track_arguments.extend(
                 dict_to_args(track_arguments, key_suffix=f":{track_id}")
+            )
+
+    def __add_font_attachments(self) -> None:
+        for track in self.info.font_attachment_tracks:
+            self.tracks_in_output.append(track)
+            track_id = self.__map_track(track)
+            self.track_arguments.extend(
+                dict_to_args({f"-codec:{track_id}": "copy"})
             )
 
     def __add_chapters(self) -> None:
@@ -918,6 +1051,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--copy-video",
         action="store_true",
         help="Don't re-encode video tracks.",
+    )
+    stream_policy_group = convert.add_mutually_exclusive_group(required=False)
+    stream_policy_group.add_argument(
+        "--stream-policy",
+        choices=("curated", "all"),
+        default="curated",
+        help=(
+            "Stream selection strategy. curated keeps a best subset; "
+            "all keeps all video/audio/subtitle streams. "
+            "Subtitle font attachments are copied when subtitles are included."
+        ),
+    )
+    stream_policy_group.add_argument(
+        "--keep-all-tracks",
+        action="store_const",
+        dest="stream_policy",
+        const="all",
+        help="Alias for --stream-policy all.",
     )
     convert.add_argument(
         "--no-video", action="store_true", help="Don't include video tracks."
@@ -1002,12 +1153,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 no_audio=args.no_audio,
                 no_subtitles=args.no_subtitles,
                 no_chapters=args.no_chapters,
+                stream_policy=args.stream_policy,
             ),
         )
-        print(f"Output Tracks: {args.source}")
+        print(f"Output Tracks: {args.source}", file=sys.stderr)
         for track in cli_builder.tracks_in_output:
-            print(f"- {track}")
-        print()
+            print(f"- {track}", file=sys.stderr)
+        print(file=sys.stderr)
         encoder_cli = cli_builder.arguments()
         print(cli_string(encoder_cli))
         if args.run:
