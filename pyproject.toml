@@ -1,3 +1,7 @@
+[build-system]
+requires = ["hatchling (>=1.29.0,<2.0.0)", "hatch-vcs (>=0.5.0,<1.0.0)"]
+build-backend = "hatchling.build"
+
 [project]
 name = "video-converter"
 version = "0.1.0"
@@ -8,35 +12,34 @@ authors = [
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "sevaht-utility @ git+https://github.com/nacitar/sevaht-utility.git@main"
+    "sevaht-utility",
 ]
 
-[tool.poetry]
-packages = [{include = "video_converter", from = "src"}]
+[project.scripts]
+video-converter = "video_converter.__main__:main"
 
-[tool.poetry.group.dev.dependencies]
-black = "^26.3.1"
-mypy = "^1.20.2"
-pytest = "^9.0.3"
-ruff = "^0.15.12"
+[dependency-groups]
+dev = [
+    "black (>=26.3.1,<27.0.0)",
+    "build (>=1.4.2,<2.0.0)",
+    "mypy (>=1.20.0,<2.0.0)",
+    "pytest (>=9.0.2,<10.0.0)",
+    "ruff (>=0.15.8,<0.16.0)",
+    "twine (>=6.2.0,<7.0.0)",
+]
 
-[build-system]
-requires = ["poetry-core>=2.0.0,<3.0.0"]
-build-backend = "poetry.core.masonry.api"
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/video_converter"]
 
 [tool.black]
 line-length = 79
 skip-magic-trailing-comma = true
 
-[tool.isort]
-line_length = 79
-profile = "black"
-
 [tool.mypy]
 strict = true
-
-[tool.poetry.scripts]
-video-converter = "video_converter.__main__:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -45,16 +48,17 @@ testpaths = ["tests"]
 line-length = 79
 
 [tool.ruff.lint]
-extend-ignore = ["E203", "E501", "COM812", "COM819"]
+extend-ignore = ["COM812", "COM819", "E203", "E501", "TD003"]
 select = [
-    "E", "F", "N", "UP", "ANN", "TCH", "TC",
-    "A", "I", "C4", "B", "SIM", "PERF", "PTH", "RET", "TRY", "Q",
-    "RUF", "DTZ", "ERA", "PIE", "TID", "S", "FA",
-    "FURB", "PGH", "BLE", "FLY", "RSE", "COM",
-    "ISC", "ASYNC", "LOG", "ARG",
-    "TD", "PLW", "EM",
-    "PLR", "C90"
+    "A", "ANN", "ARG", "ASYNC", "B", "BLE", "C4", "C90", "COM",
+    "DTZ", "E", "EM", "ERA", "F", "FA", "FLY", "FURB", "I",
+    "ISC", "LOG", "N", "PERF", "PGH", "PIE", "PLR", "PLW", "PTH",
+    "Q", "RET", "RSE", "RUF", "S", "SIM", "TC", "TCH", "TD",
+    "TID", "TRY", "UP"
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*" = ["S101", "PLR2004"]
+"tests/**/*" = ["PLR2004", "S101"]
+
+[tool.uv.sources]
+sevaht-utility = { git = "https://github.com/nacitar/sevaht-utility.git", rev = "main" }

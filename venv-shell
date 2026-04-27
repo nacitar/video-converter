@@ -1,3 +1,0 @@
-#!/bin/bash
-eval "$(poetry env activate)"
-exec "${SHELL:-bash}" -i
