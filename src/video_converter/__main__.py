@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from sevaht_utility.log_utility import log_exceptions
 
 from .application import main
