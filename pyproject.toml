@@ -8,6 +8,7 @@ authors = [
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "sevaht-utility @ git+https://github.com/nacitar/sevaht-utility.git@main"
 ]
 
 [tool.poetry]
@@ -15,9 +16,9 @@ packages = [{include = "video_converter", from = "src"}]
 
 [tool.poetry.group.dev.dependencies]
 black = "^26.3.1"
-mypy = "^1.19.1"
-pytest = "^9.0.2"
-ruff = "^0.15.8"
+mypy = "^1.20.2"
+pytest = "^9.0.3"
+ruff = "^0.15.12"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
