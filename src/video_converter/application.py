@@ -73,6 +73,12 @@ class SideData:
 
 
 @dataclass(frozen=True)
+class AudioCodecPreference:
+    rank: int
+    lossless: bool
+
+
+@dataclass(frozen=True)
 class TrackMetadata:
     identifier: str
     index: int
@@ -243,48 +249,43 @@ class TrackMetadata:
             self.codec_name.casefold() == "eac3" and "joc" in profile
         )
 
-    def audio_codec_score(self) -> int:
+    def is_lossless_audio(self) -> bool:
+        return self.audio_codec_preference().lossless
+
+    def audio_codec_preference(self) -> AudioCodecPreference:
         if self.codec_type != "audio":
-            return 0
+            return AudioCodecPreference(rank=0, lossless=False)
 
         name = self.codec_name.casefold()
         profile = self.profile.casefold()
 
-        # Lossless tier
-        if name.startswith("pcm_"):
-            # Companded PCM is lower quality than linear PCM
-            score = 60 if name in {"pcm_mulaw", "pcm_alaw"} else 90
-        elif name in {
-            "truehd",
-            "mlp",
-            "flac",
-            "alac",
-            "wavpack",
-            "ape",
-            "tta",
-        }:
-            score = 95
+        preference = AudioCodecPreference(rank=1, lossless=False)
+        match name:
+            case (
+                "truehd" | "mlp" | "flac" | "alac" | "wavpack" | "ape" | "tta"
+            ):
+                preference = AudioCodecPreference(rank=9, lossless=True)
+            case "dts":
+                if "dts-hd ma" in profile:
+                    preference = AudioCodecPreference(rank=8, lossless=True)
+                elif "dts-hd" in profile:
+                    preference = AudioCodecPreference(rank=5, lossless=False)
+                else:
+                    preference = AudioCodecPreference(rank=3, lossless=False)
+            case _ if name.startswith("pcm_"):
+                if name in {"pcm_mulaw", "pcm_alaw"}:
+                    preference = AudioCodecPreference(rank=6, lossless=False)
+                else:
+                    preference = AudioCodecPreference(rank=7, lossless=True)
+            case "opus" | "eac3" | "aac":
+                preference = AudioCodecPreference(rank=4, lossless=False)
+            case "ac3" | "vorbis" | "mp3":
+                preference = AudioCodecPreference(rank=2, lossless=False)
 
-        # DTS family (profile distinguishes lossless DTS-HD MA)
-        elif name == "dts":
-            if "dts-hd ma" in profile:
-                score = 94  # lossless
-            elif "dts-hd" in profile:  # HRA (lossy but higher quality)
-                score = 55
-            else:
-                score = 45  # DTS core (lossy)
+        return preference
 
-        # High-quality lossy tier
-        elif name in {"opus", "eac3", "aac"}:
-            score = 50
-
-        # Mid/legacy lossy tier
-        elif name in {"ac3", "vorbis", "mp3"}:
-            score = 40
-        else:
-            score = 10
-
-        return score
+    def audio_codec_score(self) -> int:
+        return self.audio_codec_preference().rank
 
     def __str__(self) -> str:
         indicator: list[str] = [str(self.index), self.identifier]
@@ -563,6 +564,7 @@ class EncoderCliOptions:
     no_video: bool
     audio_languages: list[str]
     copy_audio: bool
+    compress_audio: bool
     no_audio: bool
     no_subtitles: bool
     no_chapters: bool
@@ -864,9 +866,12 @@ class EncoderCliBuilder:
         if is_default:
             self.audio_default_assigned = True
         track_arguments = {"-disposition": "default" if is_default else "0"}
-        if self.options.copy_audio:
-            track_arguments["-codec"] = "copy"
-        else:
+        should_compress_audio = self.options.compress_audio or (
+            not self.options.copy_audio
+            and track.is_lossless_audio()
+            and not track.is_atmos()
+        )
+        if should_compress_audio:
             if track.is_atmos():
                 logger.warning(
                     f"Atmos data will be removed from track #{track_id}"
@@ -878,6 +883,8 @@ class EncoderCliBuilder:
                     "-b": f"{track.channels * 80}k",
                 }
             )
+        else:
+            track_arguments["-codec"] = "copy"
         self.track_arguments.extend(
             dict_to_args(track_arguments, key_suffix=f":{track_id}")
         )
@@ -991,10 +998,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="The desired audio language(s).  Can pass multiple times.",
     )
-    convert.add_argument(
+    audio_policy_group = convert.add_mutually_exclusive_group(required=False)
+    audio_policy_group.add_argument(
         "--copy-audio",
         action="store_true",
         help="Don't re-encode audio tracks.",
+    )
+    audio_policy_group.add_argument(
+        "--compress-audio",
+        action="store_true",
+        help="Always re-encode audio tracks to Opus.",
     )
     convert.add_argument(
         "--no-audio", action="store_true", help="Don't include audio tracks."
@@ -1051,6 +1064,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 no_video=args.no_video,
                 audio_languages=args.audio_language,
                 copy_audio=args.copy_audio,
+                compress_audio=args.compress_audio,
                 no_audio=args.no_audio,
                 no_subtitles=args.no_subtitles,
                 no_chapters=args.no_chapters,
