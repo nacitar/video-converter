@@ -811,7 +811,12 @@ class EncoderCliBuilder:
             for language_raw in self.options.audio_languages or []:
                 language = language_raw.casefold()
                 selected_track = self.info.best_audio(
-                    [AudioFilter(channel_min=channels_5_1, language=language)]
+                    [
+                        AudioFilter(
+                            channel_min=channels_5_1, language=language
+                        ),
+                        AudioFilter(language=language),
+                    ]
                 )
                 if selected_track is None:
                     logger.warning(
@@ -929,6 +934,7 @@ class EncoderCliBuilder:
     def arguments(self) -> list[str | Path]:
         return [
             cli_tool("ffmpeg"),
+            "-nostdin",
             "-stats",
             "-loglevel",
             "error",
